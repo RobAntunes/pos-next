@@ -13,10 +13,9 @@ use pos::{
     messages::{serialize_message, WireMessage, SerializableTransaction},
 };
 use quinn::{ClientConfig, Endpoint};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::convert::TryInto;
 
 #[derive(Parser)]
 #[command(author, version, about = "Smart Client - Ring-Aware Load Tester")]
@@ -56,8 +55,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Connect to both shards
     println!("🔗 Connecting to shards...");
-    let addr0: SocketAddr = args.shard_0.parse()?;
-    let addr1: SocketAddr = args.shard_1.parse()?;
+    let addr0: SocketAddr = args.shard_0
+        .to_socket_addrs()?
+        .next()
+        .ok_or("Failed to resolve shard_0 address")?;
+    let addr1: SocketAddr = args.shard_1
+        .to_socket_addrs()?
+        .next()
+        .ok_or("Failed to resolve shard_1 address")?;
 
     let conn0 = endpoint.connect(addr0, "localhost")?.await?;
     let conn1 = endpoint.connect(addr1, "localhost")?.await?;
@@ -189,6 +194,11 @@ fn create_transport_config() -> quinn::TransportConfig {
     let mut config = quinn::TransportConfig::default();
     config.max_concurrent_bidi_streams(1000u32.into());
     config.max_concurrent_uni_streams(1000u32.into());
+    
+    // Connection timeout settings
+    config.max_idle_timeout(Some(Duration::from_secs(10).try_into().unwrap()));
+    config.keep_alive_interval(Some(Duration::from_secs(2)));
+    
     config
 }
 

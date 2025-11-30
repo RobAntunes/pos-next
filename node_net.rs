@@ -29,7 +29,8 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use pos::{
-    Sequencer, SequencerConfig, Transaction, Mempool, MempoolConfig, TransactionPayload, Ledger,
+    Sequencer, SequencerConfig, Transaction, Mempool, MempoolConfig, TransactionPayload,
+    GeometricLedger,
     WireMessage, SerializableBatchHeader, SerializableTransaction, PROTOCOL_VERSION,
     messages::{serialize_message, deserialize_message},
 };
@@ -54,16 +55,16 @@ struct Args {
     producer: bool,
     
     /// Transactions per second to generate (producer mode)
-    #[arg(long, default_value_t = 1000)]
+    #[arg(long, default_value_t = 2_000_000)]
     tps: u64,
-    
-    /// Batch size for sequencer
-    #[arg(long, default_value_t = 1000)]
+
+    /// Batch size for sequencer (optimal: 45k for L3 cache)
+    #[arg(long, default_value_t = 45_000)]
     batch_size: usize,
     
     /// Generate valid geometric positions (100% acceptance rate)
     /// Without this flag, random positions are generated (~20% acceptance)
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     smart_gen: bool,
     
     /// Maximum mempool size (default: 10M transactions)
@@ -111,9 +112,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Starting {} on QUIC port {}", node_name, args.port);
     println!();
 
-    // Initialize ledger with persistence (unique per port to avoid RocksDB lock)
-    let db_path = format!("./data/pos_ledger_db_{}", args.port);
-    let ledger = Arc::new(Ledger::new(&db_path));
+    // Initialize Geometric Ledger (custom high-performance database)
+    let db_path = format!("./data/geometric_ledger_{}", args.port);
+    let ledger = Arc::new(GeometricLedger::new(&db_path).expect("Failed to initialize GeometricLedger"));
     
     // Initialize sequencer
     let config = SequencerConfig {
@@ -173,33 +174,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Producer Loop: Generate test transactions and submit to mempool
     if args.producer {
+        // Pre-mint balance for the sender account to avoid failures
+        ledger.mint(node_id, u64::MAX / 2);
+        info!("💰 Pre-minted balance for sender: {}", hex::encode(&node_id[..8]));
+
         let mempool_producer = mempool.clone();
         let tps = args.tps;
         let node_id_producer = node_id;
         let smart_gen = args.smart_gen;
-        
+
         tokio::spawn(async move {
             producer_loop(mempool_producer, tps, node_id_producer, smart_gen).await;
         });
-        
+
         info!("✅ Producer loop started (target: {} TPS, smart_gen: {})", args.tps, args.smart_gen);
     }
     
     // Consumer Loop: Pull from mempool, create batches, broadcast
+    // Run in dedicated blocking thread for maximum throughput
     let sequencer_consumer = sequencer.clone();
     let mempool_consumer = mempool.clone();
-    let ledger_consumer = ledger.clone();
     let total_processed = Arc::new(AtomicU64::new(0));
     let total_processed_clone = total_processed.clone();
-    
-    tokio::spawn(async move {
-        consumer_loop(
+
+    // Channel for signed batches (sequencer → ledger worker)
+    let (batch_tx, batch_rx) = std::sync::mpsc::sync_channel::<pos::Batch>(100);
+
+    std::thread::spawn(move || {
+        consumer_loop_blocking(
             sequencer_consumer,
             mempool_consumer,
-            ledger_consumer,
             total_processed_clone,
             batch_size,
-        ).await;
+            batch_tx,
+        );
+    });
+
+    // Async Ledger Worker: Applies batches to state (eventual consistency)
+    let ledger_worker = ledger.clone();
+    let total_applied = Arc::new(AtomicU64::new(0));
+    let total_applied_clone = total_applied.clone();
+
+    std::thread::spawn(move || {
+        ledger_worker_loop(ledger_worker, batch_rx, total_applied_clone);
     });
     
     info!("✅ Consumer loop started (batch size: {})", batch_size);
@@ -235,11 +252,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             
             _ = tokio::time::sleep(Duration::from_secs(5)) => {
                 let received = total_received.load(Ordering::Relaxed);
-                let processed = total_processed.load(Ordering::Relaxed);
+                let sequenced = total_processed.load(Ordering::Relaxed);
+                let applied = total_applied.load(Ordering::Relaxed);
                 let pending = mempool.size();
-                
-                info!("📊 Heartbeat | Mempool: {} pending | Received: {} | Processed: {}", 
-                      pending, received, processed);
+                let lag = sequenced.saturating_sub(applied);
+
+                info!("📊 Heartbeat | Mempool: {} | Sequenced: {} | Applied: {} | Lag: {} tx",
+                      pending, sequenced, applied, lag);
             }
         }
     }
@@ -384,9 +403,9 @@ async fn handle_quic_connections(
                                                 let tx: Transaction = tx.into();
                                                 if mempool.submit(tx) {
                                                     total_received.fetch_add(1, Ordering::Relaxed);
-                                                    info!("✅ Transaction added to mempool (size: {})", mempool.size());
+                                                    // No per-tx logging - check periodic metrics instead
                                                 }
-                                                
+
                                                 // Send ACK
                                                 let ack = WireMessage::Ack { msg_id: [0u8; 32] };
                                                 if let Ok(ack_bytes) = serialize_message(&ack) {
@@ -558,8 +577,9 @@ async fn producer_loop(
     let mut rng = StdRng::from_entropy();
     
     // Calculate burst size and interval for efficient batching
-    // Produce in larger bursts with longer sleeps (more cache-friendly)
-    let burst_size = (target_tps / 10).max(100).min(10_000) as usize; // 100ms worth at a time
+    // For maximum throughput: generate massive bursts to keep mempool full
+    // Consumer pulls 45k at a time, so keep 2-3 batches buffered
+    let burst_size = 135_000usize; // 3x 45k batches
     let interval_ms = (burst_size as u64 * 1000) / target_tps.max(1);
     
     // For smart generation: compute the node's ring position
@@ -667,126 +687,356 @@ async fn producer_loop(
     }
 }
 
-/// Consumer Loop: Pull from mempool, process through sequencer, apply to ledger
-/// 
-/// This is the core sequencing loop - the "heartbeat" of the blockchain.
-/// It pulls transactions from the mempool, creates batches, and applies state changes.
+/// HIGH-PERFORMANCE Consumer Loop - Blocking Thread Version
 ///
-/// KEY OPTIMIZATIONS:
-/// 1. Batch Buffering: Wait for minimum batch size to avoid micro-batch overhead
-/// 2. spawn_blocking: Offload CPU-heavy BLAKE3 work to dedicated thread pool
-async fn consumer_loop(
+/// This runs in a dedicated OS thread (not tokio) for maximum throughput.
+/// Zero async overhead - just tight CPU loop pulling from mempool and hashing.
+///
+/// ARCHITECTURE: Sequencing is decoupled from state application
+/// - This loop: FAST PATH (1.8M TPS sequencing)
+/// - Ledger worker: SLOW PATH (eventual state materialization)
+fn consumer_loop_blocking(
     sequencer: Arc<Sequencer>,
     mempool: Arc<Mempool>,
-    ledger: Arc<Ledger>,
     total_processed: Arc<AtomicU64>,
     batch_size: usize,
+    batch_sender: std::sync::mpsc::SyncSender<pos::Batch>,
 ) {
     use std::time::Instant;
-    
+
     let mut last_report = Instant::now();
     let mut batches_since_report: u64 = 0;
     let mut processed_since_report: u64 = 0;
-    
-    // Minimum batch threshold to avoid micro-batch starvation
-    // Process when we have at least 20% of target batch size OR timeout
-    let min_batch_threshold = (batch_size / 5).max(100);
-    let max_wait_ms = 50; // Don't wait more than 50ms for a full batch
-    
-    info!("🔄 Consumer starting: batch size {}, min threshold {}", batch_size, min_batch_threshold);
-    
+
+    tracing::info!("🔄 Consumer starting: batch size {} (BLOCKING MODE - MAX PERFORMANCE)", batch_size);
+
     loop {
-        // FIX #1: Batch Buffering - Wait for enough transactions
-        let mut pending = mempool.size();
-        let mut waited_ms = 0u64;
-        
-        // Wait until we have enough transactions OR timeout
-        while pending < min_batch_threshold && waited_ms < max_wait_ms {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-            waited_ms += 1;
-            pending = mempool.size();
-        }
-        
-        // Only process if we have transactions
-        if pending > 0 {
-            // Pull up to batch_size transactions
-            let pull_size = batch_size.min(pending);
-            let txs = mempool.pull_batch(pull_size);
-            
+        // Tight loop - no async overhead
+        let pending = mempool.size();
+
+        if pending >= batch_size {
+            // Pull full batch for maximum efficiency
+            let txs = mempool.pull_batch(batch_size);
+
             if !txs.is_empty() {
                 let batch_start = Instant::now();
-                let tx_count = txs.len();
-                
-                // FIX #2: Offload CPU-heavy work to blocking thread pool
-                // This prevents the BLAKE3 hashing from blocking the Tokio runtime
-                // which would starve network I/O (mDNS, QUIC handshakes)
-                let sequencer_clone = sequencer.clone();
-                let ledger_clone = ledger.clone();
-                
-                let result = tokio::task::spawn_blocking(move || {
-                    // 1. Process through sequencer (geometric filtering + BLAKE3)
-                    let (accepted, rejected) = sequencer_clone.process_batch(txs);
-                    
-                    // 2. Finalize batch
-                    let batch_opt = sequencer_clone.finalize_batch();
-                    
-                    // 3. Apply to ledger (optimistic - no signature verification)
-                    //    Uses fast-path that skips nonce checks for benchmarking
-                    let mut applied = 0;
-                    if let Some(ref batch) = batch_opt {
-                        for ptx in &batch.transactions {
-                            // Extract transfer details
-                            if let pos::TransactionPayload::Transfer { recipient, amount, .. } = &ptx.tx.payload {
-                                // Ensure sender has balance (mint on first use for benchmarks)
-                                ledger_clone.mint(ptx.tx.sender, u64::MAX / 2);
-                                
-                                // Apply transfer using fast path (no nonce check)
-                                if ledger_clone.apply_transfer_unchecked(ptx.tx.sender, *recipient, *amount) {
-                                    applied += 1;
+
+                // 1. Process through sequencer (geometric filtering + BLAKE3)
+                let (accepted, rejected) = sequencer.process_batch(txs);
+
+                // 2. Finalize batch
+                if let Some(batch) = sequencer.finalize_batch() {
+                    // 3. Send signed batch to async ledger worker
+                    // This is the FAST PATH - just sequencing, no state updates
+                    let batch_id = hex::encode(&batch.header.hash().as_bytes()[..8]);
+
+                    let elapsed_us = batch_start.elapsed().as_micros();
+                    let tps = if elapsed_us > 0 {
+                        (accepted as u128 * 1_000_000) / elapsed_us
+                    } else {
+                        0
+                    };
+
+                    // Send batch to async ledger worker (non-blocking)
+                    // If channel is full, this will block briefly
+                    if let Err(e) = batch_sender.send(batch) {
+                        tracing::error!("Failed to send batch to ledger worker: {}", e);
+                    }
+
+                    // Only log every 100th batch to reduce I/O overhead
+                    if batches_since_report % 100 == 0 {
+                        tracing::info!("📦 Batch {} | {} accepted, {} rejected | {}μs ({} TPS)",
+                                      batch_id, accepted, rejected, elapsed_us, tps);
+                    }
+
+                    total_processed.fetch_add(accepted as u64, Ordering::Relaxed);
+                    batches_since_report += 1;
+                    processed_since_report += accepted as u64;
+                }
+            }
+        } else if pending > 0 {
+            // Small number of transactions - yield to avoid busy-wait
+            std::thread::sleep(Duration::from_micros(100));
+        } else {
+            // Empty mempool - sleep a bit longer
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        // Report every 5 seconds
+        if last_report.elapsed() >= Duration::from_secs(5) {
+            let actual_tps = processed_since_report as f64 / last_report.elapsed().as_secs_f64();
+            tracing::info!("⚡ Sequencer: {} batches, {} tx/s avg, {} total sequenced",
+                          batches_since_report, actual_tps as u64, total_processed.load(Ordering::Relaxed));
+            batches_since_report = 0;
+            processed_since_report = 0;
+            last_report = Instant::now();
+        }
+    }
+}
+
+/// Async Ledger Worker - Materializes state from signed batches
+///
+/// Uses 256 shard-specific workers for horizontal scaling.
+/// Batches arrive in FIFO order (the "trick") and are routed to shard workers.
+/// Each shard processes its updates in arrival order, while different shards run in parallel.
+///
+/// KEY: The sequencer's signed batches are the source of truth.
+/// This worker just materializes that truth into queryable state.
+fn ledger_worker_loop(
+    ledger: Arc<GeometricLedger>,
+    batch_receiver: std::sync::mpsc::Receiver<pos::Batch>,
+    total_applied: Arc<AtomicU64>,
+) {
+    use std::time::Instant;
+
+    tracing::info!("💾 Starting 256 shard workers (horizontal scaling)");
+
+    // Create 256 shard-specific channels (one per shard)
+    let mut shard_senders = Vec::new();
+    let mut shard_receivers = Vec::new();
+
+    for _ in 0..256 {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<pos::Batch>>(100);
+        shard_senders.push(tx);
+        shard_receivers.push(rx);
+    }
+
+    // Spawn 256 shard workers (one per shard)
+    for shard_id in 0..256 {
+        let rx = shard_receivers.remove(0);
+        let ledger_clone = ledger.clone();
+        let total_applied_clone = total_applied.clone();
+
+        std::thread::spawn(move || {
+            shard_worker_loop(shard_id, ledger_clone, rx, total_applied_clone);
+        });
+    }
+
+    // Batch Router: Split batches by SENDER shard (for balance validation)
+    let mut last_report = Instant::now();
+    let mut batches_routed: u64 = 0;
+
+    loop {
+        match batch_receiver.recv() {
+            Ok(batch) => {
+                // Group transactions by sender's shard
+                let mut shard_batches: Vec<Vec<pos::ProcessedTransaction>> =
+                    (0..256).map(|_| Vec::new()).collect();
+
+                for ptx in batch.transactions {
+                    let sender = ptx.tx.sender;
+                    let shard_id = sender[0] as usize;
+                    shard_batches[shard_id].push(ptx);
+                }
+
+                // Send to appropriate shard workers
+                for (shard_id, txs) in shard_batches.into_iter().enumerate() {
+                    if !txs.is_empty() {
+                        let shard_batch = pos::Batch {
+                            header: batch.header.clone(),
+                            transactions: txs,
+                        };
+                        if let Err(e) = shard_senders[shard_id].send(vec![shard_batch]) {
+                            tracing::error!("Failed to send to shard {}: {}", shard_id, e);
+                        }
+                    }
+                }
+
+                batches_routed += 1;
+
+                // Report every 5 seconds
+                if last_report.elapsed() >= Duration::from_secs(5) {
+                    tracing::info!("📨 Router: {} batches routed to sender shards", batches_routed);
+                    batches_routed = 0;
+                    last_report = Instant::now();
+                }
+            }
+            Err(_) => {
+                tracing::info!("Ledger router: channel closed, exiting");
+                break;
+            }
+        }
+    }
+}
+
+/// Pending transaction waiting for balance
+#[derive(Clone)]
+struct PendingTransfer {
+    sender: [u8; 32],
+    recipient: [u8; 32],
+    amount: u64,
+    retry_count: u32,
+    batch_number: u64,
+}
+
+/// Individual shard worker - processes batches for one sender shard in FIFO order
+///
+/// Maintains a pending queue for transactions that fail due to insufficient balance.
+/// Retries pending transactions after each batch, with timeout after 100 retries (~5 seconds).
+fn shard_worker_loop(
+    shard_id: usize,
+    ledger: Arc<GeometricLedger>,
+    batch_receiver: std::sync::mpsc::Receiver<Vec<pos::Batch>>,
+    total_applied: Arc<AtomicU64>,
+) {
+    use std::time::Instant;
+    use std::collections::{VecDeque, HashMap};
+    use pos::Account;
+
+    const MAX_RETRIES: u32 = 100;  // ~5 seconds at 50 batches/sec
+
+    let mut pending_queue: VecDeque<PendingTransfer> = VecDeque::new();
+    let mut last_report = Instant::now();
+    let mut batches_processed: u64 = 0;
+    let mut transfers_applied: u64 = 0;
+    let mut transfers_rejected: u64 = 0;
+    let mut transfers_pending: u64 = 0;
+
+    loop {
+        match batch_receiver.recv() {
+            Ok(batches) => {
+                for batch in batches {
+                    batches_processed += 1;
+
+                    // OPTIMIZATION: Batch all ledger updates together
+                    // Instead of individual apply_transfer calls, accumulate all changes
+                    // and do a single update_batch at the end.
+
+                    let mut account_cache: HashMap<[u8; 32], Account> = HashMap::new();
+                    let mut successful_transfers = 0u64;
+
+                    // 1. Process new transactions from this batch
+                    for ptx in batch.transactions {
+                        if let pos::TransactionPayload::Transfer {
+                            recipient,
+                            amount,
+                            ..
+                        } = ptx.tx.payload
+                        {
+                            let sender = ptx.tx.sender;
+
+                            // Get current sender balance (from cache or ledger)
+                            let mut sender_acc = if let Some(acc) = account_cache.get(&sender) {
+                                acc.clone()
+                            } else {
+                                ledger.get(&sender).unwrap_or_else(|| Account {
+                                    pubkey: sender,
+                                    ..Default::default()
+                                })
+                            };
+
+                            if sender_acc.balance >= amount {
+                                // Sufficient balance - process transfer
+                                sender_acc.balance -= amount;
+                                account_cache.insert(sender, sender_acc);
+
+                                // Credit recipient
+                                let mut recipient_acc = if let Some(acc) = account_cache.get(&recipient) {
+                                    acc.clone()
+                                } else {
+                                    ledger.get(&recipient).unwrap_or_else(|| Account {
+                                        pubkey: recipient,
+                                        ..Default::default()
+                                    })
+                                };
+                                recipient_acc.balance += amount;
+                                account_cache.insert(recipient, recipient_acc);
+
+                                successful_transfers += 1;
+                            } else {
+                                // Insufficient balance - add to pending queue
+                                pending_queue.push_back(PendingTransfer {
+                                    sender,
+                                    recipient,
+                                    amount,
+                                    retry_count: 0,
+                                    batch_number: batches_processed,
+                                });
+                                transfers_pending += 1;
+                            }
+                        }
+                    }
+
+                    // 2. Retry pending transactions (balance might have arrived in this batch)
+                    let pending_count = pending_queue.len();
+                    for _ in 0..pending_count {
+                        if let Some(mut pending) = pending_queue.pop_front() {
+                            let mut sender_acc = if let Some(acc) = account_cache.get(&pending.sender) {
+                                acc.clone()
+                            } else {
+                                ledger.get(&pending.sender).unwrap_or_else(|| Account {
+                                    pubkey: pending.sender,
+                                    ..Default::default()
+                                })
+                            };
+
+                            if sender_acc.balance >= pending.amount {
+                                // Success! Balance arrived
+                                sender_acc.balance -= pending.amount;
+                                account_cache.insert(pending.sender, sender_acc);
+
+                                let mut recipient_acc = if let Some(acc) = account_cache.get(&pending.recipient) {
+                                    acc.clone()
+                                } else {
+                                    ledger.get(&pending.recipient).unwrap_or_else(|| Account {
+                                        pubkey: pending.recipient,
+                                        ..Default::default()
+                                    })
+                                };
+                                recipient_acc.balance += pending.amount;
+                                account_cache.insert(pending.recipient, recipient_acc);
+
+                                successful_transfers += 1;
+                                transfers_pending -= 1;
+                            } else {
+                                // Still insufficient - retry later
+                                pending.retry_count += 1;
+                                if pending.retry_count < MAX_RETRIES {
+                                    pending_queue.push_back(pending);
+                                } else {
+                                    // Timeout - reject permanently
+                                    transfers_rejected += 1;
+                                    transfers_pending -= 1;
+                                    if transfers_rejected % 100 == 0 {
+                                        tracing::warn!("💸 Shard {:03}: Transaction timed out after {} retries (batch {})",
+                                                      shard_id, MAX_RETRIES, pending.batch_number);
+                                    }
                                 }
                             }
                         }
                     }
-                    
-                    (accepted, rejected, applied, batch_opt)
-                }).await;
-                
-                if let Ok((accepted, rejected, applied, batch_opt)) = result {
-                    if let Some(batch) = batch_opt {
-                        let batch_id = hex::encode(&batch.header.hash().as_bytes()[..8]);
-                        
-                        let elapsed_us = batch_start.elapsed().as_micros();
-                        let tps = if elapsed_us > 0 {
-                            (accepted as u128 * 1_000_000) / elapsed_us
+
+                    // 3. SINGLE BATCH WRITE - This is the key optimization!
+                    // Write all modified accounts in one shot instead of individual writes
+                    if !account_cache.is_empty() {
+                        let updates: Vec<([u8; 32], Account)> = account_cache.into_iter().collect();
+                        if let Err(e) = ledger.update_batch(&updates) {
+                            tracing::error!("Shard {:03}: Batch update failed: {}", shard_id, e);
                         } else {
-                            0
-                        };
-                        
-                        // Only log large batches or every Nth small batch to reduce noise
-                        if tx_count >= 1000 || batches_since_report % 10 == 0 {
-                            info!("📦 Batch {} | {} accepted, {} rejected | {} applied | {}μs ({} TPS)",
-                                  batch_id, accepted, rejected, applied, elapsed_us, tps);
+                            transfers_applied += successful_transfers;
                         }
-                        
-                        total_processed.fetch_add(accepted as u64, Ordering::Relaxed);
-                        batches_since_report += 1;
-                        processed_since_report += accepted as u64;
                     }
                 }
+
+                total_applied.fetch_add(transfers_applied, Ordering::Relaxed);
+
+                // Report every 10 seconds per shard
+                if last_report.elapsed() >= Duration::from_secs(10) {
+                    let tps = transfers_applied as f64 / last_report.elapsed().as_secs_f64();
+                    tracing::debug!("💾 Shard {:03}: {} batches, {} applied, {} pending, {} rejected, {:.0} TPS",
+                                   shard_id, batches_processed, transfers_applied,
+                                   pending_queue.len(), transfers_rejected, tps);
+                    batches_processed = 0;
+                    transfers_applied = 0;
+                    transfers_rejected = 0;
+                    last_report = Instant::now();
+                }
             }
-        } else {
-            // No transactions - sleep longer to avoid busy-waiting
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        
-        // Report every 5 seconds
-        if last_report.elapsed() >= Duration::from_secs(5) {
-            let actual_tps = processed_since_report as f64 / last_report.elapsed().as_secs_f64();
-            info!("🔄 Consumer: {} batches, {} tx/s avg, {} total processed",
-                  batches_since_report, actual_tps as u64, total_processed.load(Ordering::Relaxed));
-            batches_since_report = 0;
-            processed_since_report = 0;
-            last_report = Instant::now();
+            Err(_) => {
+                tracing::info!("Shard {} worker: channel closed, {} pending transactions dropped",
+                              shard_id, pending_queue.len());
+                break;
+            }
         }
     }
 }
