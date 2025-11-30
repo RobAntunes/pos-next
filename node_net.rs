@@ -111,8 +111,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Starting {} on QUIC port {}", node_name, args.port);
     println!();
 
-    // Initialize ledger with persistence
-    let ledger = Arc::new(Ledger::new("./data/pos_ledger_db"));
+    // Initialize ledger with persistence (unique per port to avoid RocksDB lock)
+    let db_path = format!("./data/pos_ledger_db_{}", args.port);
+    let ledger = Arc::new(Ledger::new(&db_path));
     
     // Initialize sequencer
     let config = SequencerConfig {

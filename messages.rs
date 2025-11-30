@@ -71,6 +71,12 @@ pub enum WireMessage {
         /// Message ID being acknowledged
         msg_id: [u8; 32],
     },
+
+    /// Forwarded transaction (bridge between shards)
+    ForwardedTx {
+        /// Serialized transaction
+        tx: SerializableTransaction,
+    },
 }
 
 /// Serializable version of BatchHeader (bincode-compatible)

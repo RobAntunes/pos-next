@@ -9,6 +9,7 @@ pub mod network;
 pub mod messages;
 pub mod mempool;
 pub mod ring;
+pub mod tui;
 
 pub use protocol::{TangleProtocol, Commitment};
 pub use metrics::NodeMetrics;
