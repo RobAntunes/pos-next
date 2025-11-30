@@ -1,0 +1,49 @@
+[package]
+name = "pos"
+version = "0.1.0"
+edition = "2021"
+description = "High-throughput Proof of Stake consensus protocol"
+
+[lib]
+path = "lib.rs"
+
+[[bin]]
+name = "pos-node"
+path = "main.rs"
+
+[[bin]]
+name = "pos-net"
+path = "net_main.rs"
+
+[dependencies]
+blake3 = "1.5"
+rayon = "1.10"
+mimalloc = "0.1"
+quinn = "0.10"
+rustls = { version = "0.21", features = ["quic"] }
+libp2p = { version = "0.53", features = ["kad", "tcp", "tokio", "macros", "noise", "yamux"] }
+bytes = "1.5"
+tokio-util = { version = "0.7", features = ["codec"] }
+rcgen = "0.11"
+async-trait = "0.1"
+curve25519-dalek = { version = "4.1", features = ["digest"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+parking_lot = "0.12"
+dashmap = "5.5"
+tokio = { version = "1.35", features = ["full", "rt-multi-thread", "macros", "time", "sync"] }
+uuid = { version = "1.6", features = ["v4"] }
+rand = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+hex = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.bench]
+opt-level = 3
+lto = true
