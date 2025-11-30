@@ -339,14 +339,12 @@ async fn start_quic_server(port: u16) -> Result<Endpoint, Box<dyn std::error::Er
     let mut endpoint = Endpoint::server(server_config, addr)?;
     
     // Configure client side to accept ANY certificate (for demo with self-signed certs)
-    let mut crypto = rustls::ClientConfig::builder()
-        .with_safe_defaults()
-        .with_root_certificates(rustls::RootCertStore::empty())
-        .with_no_client_auth();
-    
     // Disable certificate verification for demo (DO NOT USE IN PRODUCTION)
-    crypto.dangerous().set_certificate_verifier(Arc::new(NoCertificateVerification));
-    
+    let crypto = rustls::ClientConfig::builder()
+        .with_safe_defaults()
+        .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+        .with_no_client_auth();
+
     let mut client_config = ClientConfig::new(Arc::new(crypto));
     client_config.transport_config(Arc::new(create_transport_config()));
     endpoint.set_default_client_config(client_config);

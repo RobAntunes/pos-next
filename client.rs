@@ -171,15 +171,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn create_client_endpoint() -> Result<Endpoint, Box<dyn std::error::Error>> {
-    let mut crypto = rustls::ClientConfig::builder()
-        .with_safe_defaults()
-        .with_root_certificates(rustls::RootCertStore::empty())
-        .with_no_client_auth();
-
     // Disable certificate verification for demo (DO NOT USE IN PRODUCTION)
-    crypto
-        .dangerous()
-        .set_certificate_verifier(Arc::new(NoCertificateVerification));
+    let crypto = rustls::ClientConfig::builder()
+        .with_safe_defaults()
+        .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+        .with_no_client_auth();
 
     let mut client_config = ClientConfig::new(Arc::new(crypto));
     client_config.transport_config(Arc::new(create_transport_config()));
