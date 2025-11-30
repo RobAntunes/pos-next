@@ -1,9 +1,4 @@
 //! Geometric Ledger - Persistent, Crash-Safe, Windows-Compatible
-//! 
-//! Fixes from previous version:
-//! 1. Uses `read_unaligned` to prevent SEGFAULT on Windows/WSL.
-//! 2. Allocates Index on Heap to prevent Stack Overflow.
-//! 3. Ensures data directories exist before opening files.
 
 use memmap2::{MmapMut, MmapOptions};
 use std::fs::{self, OpenOptions};
@@ -91,7 +86,6 @@ impl Shard {
         let path = data_dir.join(format!("shard_{:03}.bin", shard_id));
         let size = (ACCOUNTS_PER_SHARD * ACCOUNT_SIZE) as u64;
 
-        // Ensure directory exists
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
@@ -103,7 +97,6 @@ impl Shard {
             .open(&path)
             .map_err(|e| format!("Failed to open shard file: {}", e))?;
 
-        // Ensure file size
         if file.metadata().map_err(|e| e.to_string())?.len() < size {
             file.set_len(size).map_err(|e| format!("Failed to set length: {}", e))?;
         }
@@ -115,7 +108,6 @@ impl Shard {
                 .map_err(|e| format!("Failed to mmap: {}", e))?
         };
 
-        // Heap allocation for Index to avoid Stack Overflow
         let mut index_vec = Vec::with_capacity(INDEX_SIZE);
         for _ in 0..INDEX_SIZE {
             index_vec.push(AtomicSlot::new());
@@ -206,7 +198,6 @@ impl Shard {
     fn get(&self, pubkey: &[u8; 32]) -> Option<Account> {
         let hash = hash_pubkey(pubkey);
         let mut idx = (hash as usize) % INDEX_SIZE;
-        
         for _ in 0..128 {
             if let Some((slot_hash, offset, _)) = self.index[idx].unpack() {
                 if slot_hash == hash {
@@ -223,7 +214,6 @@ impl Shard {
         None
     }
 
-    // --- THE SEGFAULT FIX ---
     fn write_account(&self, offset: usize, account: &Account) {
         let start = offset * ACCOUNT_SIZE;
         let dst = unsafe { self.mmap.as_ptr().add(start) as *mut u8 };
@@ -236,7 +226,6 @@ impl Shard {
         }
     }
 
-    // SAFE READ: Uses unaligned read to prevent Windows/WSL crashes
     fn read_account(&self, offset: usize) -> Account {
         let start = offset * ACCOUNT_SIZE;
         let src = unsafe { self.mmap.as_ptr().add(start) };
@@ -252,28 +241,20 @@ impl Shard {
 
 pub struct GeometricLedger {
     shards: Vec<Shard>,
-    data_dir: PathBuf,
 }
 
 impl GeometricLedger {
     pub fn new(data_dir: impl AsRef<Path>) -> Result<Self, String> {
-        let data_dir = data_dir.as_ref().to_path_buf();
-        fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
-
-        println!("📂 Initializing Geometric Ledger (256 shards)...");
-
-        // Parallel Init
+        let data_dir = data_dir.as_ref();
         let shards: Result<Vec<_>, _> = (0..SHARD_COUNT).into_par_iter().map(|i| {
-            Shard::open(&data_dir, i)
+            Shard::open(data_dir, i)
         }).collect();
         
         let shards = shards?;
-        
-        // Count total accounts
         let total: u32 = shards.iter().map(|s| s.account_count.load(Ordering::Relaxed)).sum();
         println!("✅ Geometric Ledger loaded: {} accounts active.", total);
 
-        Ok(Self { shards, data_dir })
+        Ok(Self { shards })
     }
 
     pub fn update_batch(&self, updates: &[([u8; 32], Account)]) -> Result<(), String> {
@@ -306,17 +287,25 @@ impl GeometricLedger {
         self.shards.par_iter().try_for_each(|s| s.flush())
     }
     
-    // Stats for TUI
-    pub fn stats(&self) -> super::ledger::LedgerStats {
+    pub fn stats(&self) -> LedgerStats {
         let total_accounts = self.shards.iter().map(|s| s.account_count.load(Ordering::Relaxed)).sum();
         let total_writes = self.shards.iter().map(|s| s.write_count.load(Ordering::Relaxed)).sum();
-        super::ledger::LedgerStats {
+        
+        LedgerStats {
             total_accounts,
             total_writes,
             shard_count: SHARD_COUNT,
             capacity: (SHARD_COUNT * ACCOUNTS_PER_SHARD) as u64,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct LedgerStats {
+    pub total_accounts: u32,
+    pub total_writes: u64,
+    pub shard_count: usize,
+    pub capacity: u64,
 }
 
 fn hash_pubkey(pubkey: &[u8; 32]) -> u32 {
