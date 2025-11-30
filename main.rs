@@ -59,7 +59,7 @@ async fn main() {
         sequencer_id: generate_random_id(),
         signing_key: generate_random_id(),
         batch_size: DEFAULT_BATCH_SIZE,
-        max_distance: MAX_DISTANCE,
+        max_range: MAX_DISTANCE,
         ..Default::default()
     };
 
@@ -137,6 +137,11 @@ async fn main() {
                 // Process using lock-free reduction on the SHARED sequencer
                 let (accepted, rejected) = sequencer.process_batch_ref(txs);
                 
+                // Check if batch is ready and finalize to free memory
+                if sequencer.batch_ready() {
+                    let _ = sequencer.finalize_batch();
+                }
+
                 local_processed += accepted as u64;
                 local_rejected += rejected as u64;
 

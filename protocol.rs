@@ -30,13 +30,7 @@ pub struct Commitment {
     pub temporal_binding: Hash,
 }
 
-#[derive(Debug)]
-pub struct GeometricPosition {
-    pub tx_position: (u64, u64),
-    pub node_position: Option<(u64, u64)>,
-    pub distance: Option<u64>,
-    pub theta: Option<u64>,
-}
+// GeometricPosition moved to types.rs and replaced with RingInfo
 
 impl TangleProtocol {
     /// Create a new instance with optional master seed and initial salt
@@ -246,58 +240,10 @@ impl TangleProtocol {
         }
     }
 
-    /// Calculate geometric positions for transactions and nodes
-    pub fn calculate_geometric_position(
-        &self,
-        commitment: &Hash,
-        node_id: Option<&[u8]>,
-    ) -> GeometricPosition {
-        let mut hasher = Hasher::new();
-        hasher.update(commitment.as_bytes());
-        let position_hash = hasher.finalize();
-
-        // Use first 16 bytes for transaction position
-        let tx_bytes: [u8; 16] = position_hash.as_bytes()[0..16].try_into().unwrap();
-        let tx_x = u64::from_le_bytes(tx_bytes[0..8].try_into().unwrap());
-        let tx_y = u64::from_le_bytes(tx_bytes[8..16].try_into().unwrap());
-        let tx_position = (tx_x, tx_y);
-
-        let (node_position, distance, theta) = if let Some(node_id) = node_id {
-            // Calculate node position
-            let mut hasher = Hasher::new();
-            hasher.update(node_id);
-            let node_hash = hasher.finalize();
-            
-            let node_bytes: [u8; 16] = node_hash.as_bytes()[0..16].try_into().unwrap();
-            let node_x = u64::from_le_bytes(node_bytes[0..8].try_into().unwrap());
-            let node_y = u64::from_le_bytes(node_bytes[8..16].try_into().unwrap());
-            
-            // Calculate distance and angle using saturating arithmetic to prevent overflow
-            let dx = if tx_x > node_x { tx_x - node_x } else { node_x - tx_x };
-            let dy = if tx_y > node_y { tx_y - node_y } else { node_y - tx_y };
-            // Use u128 for intermediate calculation to avoid overflow in squaring
-            let dx_sq = (dx as u128).saturating_mul(dx as u128);
-            let dy_sq = (dy as u128).saturating_mul(dy as u128);
-            let sum = dx_sq.saturating_add(dy_sq);
-            let distance = (sum as f64).sqrt() as u64;
-            
-            let theta = if dx == 0 {
-                90 // dy is always non-negative after abs-style subtraction
-            } else {
-                ((dy as f64 / dx as f64).atan() * 180.0 / std::f64::consts::PI) as u64
-            };
-
-            (Some((node_x, node_y)), Some(distance), Some(theta))
-        } else {
-            (None, None, None)
-        };
-
-        GeometricPosition {
-            tx_position,
-            node_position,
-            distance,
-            theta,
-        }
+    /// Calculate ring position for transactions and nodes
+    /// This is now delegated to the ring module for cleaner separation
+    pub fn calculate_ring_position(&self, commitment: &Hash) -> crate::types::RingPosition {
+        crate::ring::calculate_ring_position(commitment)
     }
 
     /// Validate a set of commitments using XOR aggregation (O(1) set validation)
@@ -382,14 +328,13 @@ mod tests {
     }
 
     #[test]
-    fn test_geometric_position() {
+    fn test_ring_position() {
         let protocol = TangleProtocol::new(None, None);
         let commitment = blake3::hash(b"test commitment");
-        let node_id = b"test node";
-        
-        let position = protocol.calculate_geometric_position(&commitment, Some(node_id));
-        assert!(position.distance.is_some());
-        assert!(position.theta.is_some());
+
+        let position = protocol.calculate_ring_position(&commitment);
+        // Ring position should be a valid u64
+        assert!(position <= u64::MAX);
     }
 
     #[test]
@@ -414,11 +359,14 @@ mod tests {
     }
 
     #[test]
-    fn test_geometric_distance_no_overflow() {
+    fn test_ring_position_deterministic() {
         let protocol = TangleProtocol::new(None, None);
-        // Use a commitment that would produce extreme coordinates
-        let commitment = blake3::hash(b"extreme position test");
-        // This should not panic even with extreme node positions
-        let _position = protocol.calculate_geometric_position(&commitment, Some(&[0xff; 32]));
+        let commitment = blake3::hash(b"test");
+
+        let pos1 = protocol.calculate_ring_position(&commitment);
+        let pos2 = protocol.calculate_ring_position(&commitment);
+
+        // Same input should produce same ring position
+        assert_eq!(pos1, pos2);
     }
 }

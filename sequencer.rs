@@ -20,8 +20,9 @@ use parking_lot::RwLock;
 use rayon::prelude::*;
 
 use crate::metrics::NodeMetrics;
+use crate::ring::calculate_ring_position;
 use crate::types::{
-    Batch, BatchHeader, GeometricPosition, ProcessedTransaction, Transaction,
+    Batch, BatchHeader, ProcessedTransaction, RingInfo, RingPosition, Transaction,
     DEFAULT_BATCH_SIZE, MAX_DISTANCE,
 };
 
@@ -34,26 +35,24 @@ pub struct SequencerConfig {
     pub signing_key: [u8; 32],
     /// Maximum transactions per batch
     pub batch_size: usize,
-    /// Maximum geometric distance for acceptance
-    pub max_distance: u64,
-    /// Node position for geometric filtering
-    pub node_position: (u64, u64),
+    /// Maximum ring range for acceptance (distance on the ring)
+    pub max_range: u64,
+    /// Node position on the ring
+    pub node_position: RingPosition,
 }
 
 impl Default for SequencerConfig {
     fn default() -> Self {
-        // Generate deterministic node position from a default seed
+        // Generate deterministic node position on the ring
         let node_hash = blake3::hash(b"default-sequencer-node");
-        let bytes = node_hash.as_bytes();
-        let x = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-        let y = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let node_position = calculate_ring_position(&node_hash);
 
         Self {
             sequencer_id: [0u8; 32],
             signing_key: [0u8; 32],
             batch_size: DEFAULT_BATCH_SIZE,
-            max_distance: MAX_DISTANCE,
-            node_position: (x, y),
+            max_range: MAX_DISTANCE,
+            node_position,
         }
     }
 }
@@ -85,7 +84,7 @@ impl Sequencer {
     }
 
     /// Process a single transaction (fast path - BLAKE3 only)
-    /// Returns true if accepted, false if rejected due to geometric constraints
+    /// Returns true if accepted, false if rejected due to ring range constraints
     #[inline]
     pub fn process_transaction(&self, tx: Transaction) -> bool {
         let start = Instant::now();
@@ -93,20 +92,18 @@ impl Sequencer {
         // 1. Compute transaction hash (BLAKE3 - fast)
         let tx_hash = tx.hash();
 
-        // 2. Calculate geometric position (BLAKE3 - O(1))
-        let position = self.calculate_position(&tx_hash);
+        // 2. Calculate ring position (BLAKE3 - O(1))
+        let ring_info = self.calculate_ring_info(&tx_hash);
 
-        // 3. Filter by distance constraint
-        if let Some(distance) = position.distance {
-            if distance > self.config.max_distance {
-                return false; // Rejected - outside acceptance zone
-            }
+        // 3. Filter by ring range constraint
+        if !ring_info.is_within_range(self.config.max_range) {
+            return false; // Rejected - outside acceptance range
         }
 
         // 4. Add to pending batch
         let processed = ProcessedTransaction {
             tx,
-            position,
+            ring_info,
             tx_hash,
         };
 
@@ -127,41 +124,45 @@ impl Sequencer {
         true
     }
 
+    /// Process a batch of transactions (consumes the Vec)
+    pub fn process_batch(&self, txs: Vec<Transaction>) -> (usize, usize) {
+        self.process_batch_parallel_reduce(txs)
+    }
+
     /// Process a batch of transactions (Reference version for Zero-Copy)
     /// Uses LOCK-FREE aggregation via Rayon Map-Reduce
     pub fn process_batch_ref(&self, txs: &[Transaction]) -> (usize, usize) {
         let start = Instant::now();
         let total = txs.len();
         let node_pos = self.config.node_position;
-        let max_dist = self.config.max_distance;
+        let max_range = self.config.max_range;
 
         // 1. Map-Reduce: Compute everything in parallel and aggregate without locks
+        // Use fold to avoid allocating a vector for every transaction
         let (accepted_txs, batch_xor) = txs.par_iter()
-            .map(|tx| {
-                let tx_hash = tx.hash();
-                let position = Self::calculate_position_stateless(&tx_hash, node_pos);
-                
-                // Geometric filter
-                let accept = position.distance
-                    .map(|d| d <= max_dist)
-                    .unwrap_or(true);
+            .fold(
+                || (Vec::new(), [0u8; 32]),
+                |(mut batch, mut xor), tx| {
+                    let tx_hash = tx.hash();
+                    let ring_info = Self::calculate_ring_info_stateless(&tx_hash, node_pos);
 
-                if accept {
-                    let mut xor_part = [0u8; 32];
-                    let hash_bytes = tx_hash.as_bytes();
-                    for i in 0..32 {
-                        xor_part[i] = hash_bytes[i];
+                    // Ring range filter
+                    let accept = ring_info.is_within_range(max_range);
+
+                    if accept {
+                        batch.push(ProcessedTransaction {
+                            tx: tx.clone(),
+                            ring_info,
+                            tx_hash,
+                        });
+                        let hash_bytes = tx_hash.as_bytes();
+                        for i in 0..32 {
+                            xor[i] ^= hash_bytes[i];
+                        }
                     }
-                    
-                    (vec![ProcessedTransaction {
-                        tx: tx.clone(), // unavoidable if we want to store it
-                        position,
-                        tx_hash,
-                    }], xor_part)
-                } else {
-                    (Vec::new(), [0u8; 32])
-                }
-            })
+                    (batch, xor)
+                },
+            )
             .reduce(
                 || (Vec::new(), [0u8; 32]), // Identity
                 |mut a, b| {
@@ -172,7 +173,7 @@ impl Sequencer {
                         a.1[i] ^= b.1[i];
                     }
                     a
-                }
+                },
             );
 
         let accepted_count = accepted_txs.len();
@@ -181,7 +182,7 @@ impl Sequencer {
         if accepted_count > 0 {
             let mut pending = self.pending.write();
             let mut current_xor = self.current_xor.write();
-            
+
             pending.extend(accepted_txs);
             for i in 0..32 {
                 current_xor[i] ^= batch_xor[i];
@@ -199,17 +200,17 @@ impl Sequencer {
         let start = Instant::now();
         let total = txs.len();
         let node_pos = self.config.node_position;
-        let max_dist = self.config.max_distance;
+        let max_range = self.config.max_range;
 
         // PARALLEL: Process all transactions and reduce XOR in parallel
         let (new_pending, batch_xor): (Vec<ProcessedTransaction>, [u8; 32]) = txs
             .into_par_iter()
             .filter_map(|tx| {
                 let tx_hash = tx.hash();
-                let position = Self::calculate_position_stateless(&tx_hash, node_pos);
+                let ring_info = Self::calculate_ring_info_stateless(&tx_hash, node_pos);
 
-                if position.distance.map(|d| d <= max_dist).unwrap_or(true) {
-                    Some((ProcessedTransaction { tx, position, tx_hash }, *tx_hash.as_bytes()))
+                if ring_info.is_within_range(max_range) {
+                    Some((ProcessedTransaction { tx, ring_info, tx_hash }, *tx_hash.as_bytes()))
                 } else {
                     None
                 }
@@ -254,49 +255,30 @@ impl Sequencer {
         (accepted, total - accepted)
     }
 
-    /// Calculate geometric position using BLAKE3 (O(1)) - instance method
+    /// Calculate ring info using BLAKE3 (O(1)) - instance method
     #[inline]
-    fn calculate_position(&self, tx_hash: &Hash) -> GeometricPosition {
-        Self::calculate_position_stateless(tx_hash, self.config.node_position)
+    fn calculate_ring_info(&self, tx_hash: &Hash) -> RingInfo {
+        Self::calculate_ring_info_stateless(tx_hash, self.config.node_position)
     }
 
-    /// Calculate geometric position - STATELESS pure function for parallel execution
+    /// Calculate ring info - STATELESS pure function for parallel execution
     #[inline]
-    fn calculate_position_stateless(tx_hash: &Hash, node_pos: (u64, u64)) -> GeometricPosition {
-        let mut hasher = Hasher::new();
-        hasher.update(tx_hash.as_bytes());
-        let position_hash = hasher.finalize();
+    fn calculate_ring_info_stateless(tx_hash: &Hash, node_pos: RingPosition) -> RingInfo {
+        // Get transaction position on the ring
+        let tx_position = calculate_ring_position(tx_hash);
 
-        // Extract position from hash bytes
-        let bytes = position_hash.as_bytes();
-        let tx_x = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-        let tx_y = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-
-        let (node_x, node_y) = node_pos;
-
-        // Calculate distance using saturating arithmetic to prevent overflow
-        let dx = if tx_x > node_x { tx_x - node_x } else { node_x - tx_x };
-        let dy = if tx_y > node_y { tx_y - node_y } else { node_y - tx_y };
-
-        // Use u128 for intermediate calculation to avoid overflow
-        let dx_sq = (dx as u128).saturating_mul(dx as u128);
-        let dy_sq = (dy as u128).saturating_mul(dy as u128);
-        let sum = dx_sq.saturating_add(dy_sq);
-        let distance = (sum as f64).sqrt() as u64;
-
-        // Calculate theta (angle) - dy is always non-negative
-        let theta = if dx == 0 {
-            90
+        // Calculate clockwise distance on the ring from node to transaction
+        let distance = if tx_position >= node_pos {
+            tx_position - node_pos
         } else {
-            let angle = (dy as f64 / dx as f64).atan();
-            ((angle * 180.0 / std::f64::consts::PI) as u64) % 360
+            // Wrap around: distance = (MAX - node_pos) + tx_pos + 1
+            (u64::MAX - node_pos) + tx_position + 1
         };
 
-        GeometricPosition {
-            tx_position: (tx_x, tx_y),
-            node_position: Some((node_x, node_y)),
+        RingInfo {
+            tx_position,
+            node_position: Some(node_pos),
             distance: Some(distance),
-            theta: Some(theta),
         }
     }
 
@@ -342,22 +324,20 @@ impl Sequencer {
         })
     }
 
-    /// Compute Merkle root of geometric positions
+    /// Compute Merkle root of ring positions
     fn compute_structure_root(&self, txs: &[ProcessedTransaction]) -> Hash {
         if txs.is_empty() {
             return blake3::hash(b"empty");
         }
 
-        // Simple approach: hash all positions together
+        // Simple approach: hash all ring positions together
         // A real implementation would build a proper Merkle tree
         let mut hasher = Hasher::new();
         for ptx in txs {
-            let pos = &ptx.position;
-            hasher.update(&pos.tx_position.0.to_le_bytes());
-            hasher.update(&pos.tx_position.1.to_le_bytes());
-            if let Some((nx, ny)) = pos.node_position {
-                hasher.update(&nx.to_le_bytes());
-                hasher.update(&ny.to_le_bytes());
+            let ring_info = &ptx.ring_info;
+            hasher.update(&ring_info.tx_position.to_le_bytes());
+            if let Some(node_pos) = ring_info.node_position {
+                hasher.update(&node_pos.to_le_bytes());
             }
         }
         hasher.finalize()
@@ -453,7 +433,7 @@ mod tests {
     #[test]
     fn test_process_single_transaction() {
         let config = SequencerConfig {
-            max_distance: u64::MAX, // Accept all
+            max_range: u64::MAX, // Accept all
             ..Default::default()
         };
         let sequencer = Sequencer::new(config);
@@ -466,7 +446,7 @@ mod tests {
     #[test]
     fn test_process_batch() {
         let config = SequencerConfig {
-            max_distance: u64::MAX,
+            max_range: u64::MAX,
             ..Default::default()
         };
         let sequencer = Sequencer::new(config);
@@ -482,7 +462,7 @@ mod tests {
     #[test]
     fn test_finalize_batch() {
         let config = SequencerConfig {
-            max_distance: u64::MAX,
+            max_range: u64::MAX,
             ..Default::default()
         };
         let sequencer = Sequencer::new(config);
@@ -512,10 +492,10 @@ mod tests {
     }
 
     #[test]
-    fn test_geometric_distance_no_overflow() {
+    fn test_ring_distance_no_overflow() {
         let config = SequencerConfig {
-            node_position: (u64::MAX, u64::MAX),
-            max_distance: u64::MAX,
+            node_position: u64::MAX,
+            max_range: u64::MAX,
             ..Default::default()
         };
         let sequencer = Sequencer::new(config);

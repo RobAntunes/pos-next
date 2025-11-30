@@ -118,28 +118,36 @@ impl Transaction {
     }
 }
 
-/// Processed transaction with geometric position
+/// Processed transaction with ring position
 #[derive(Debug, Clone)]
 pub struct ProcessedTransaction {
     /// Original transaction
     pub tx: Transaction,
-    /// Geometric position derived from BLAKE3
-    pub position: GeometricPosition,
+    /// Ring position derived from BLAKE3
+    pub ring_info: RingInfo,
     /// Transaction hash
     pub tx_hash: Hash,
 }
 
-/// Geometric position for transaction placement
+/// Position on the consistent hash ring (0 to u64::MAX)
+pub type RingPosition = u64;
+
+/// Ring-based position for transaction placement
 #[derive(Debug, Clone, Copy)]
-pub struct GeometricPosition {
-    /// Transaction position (x, y) derived from commitment hash
-    pub tx_position: (u64, u64),
-    /// Assigning node's position (x, y)
-    pub node_position: Option<(u64, u64)>,
-    /// Euclidean distance between tx and node (using saturating math)
+pub struct RingInfo {
+    /// Transaction's position on the ring (0 to u64::MAX)
+    pub tx_position: RingPosition,
+    /// Node's position on the ring (if applicable)
+    pub node_position: Option<RingPosition>,
+    /// Clockwise distance on the ring from node to transaction
     pub distance: Option<u64>,
-    /// Angular position (theta mod 2^256, stored as u64)
-    pub theta: Option<u64>,
+}
+
+impl RingInfo {
+    /// Check if transaction is within acceptance range
+    pub fn is_within_range(&self, max_range: u64) -> bool {
+        self.distance.map(|d| d <= max_range).unwrap_or(true)
+    }
 }
 
 /// Batch header for rollup commitment

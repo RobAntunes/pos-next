@@ -177,8 +177,8 @@ impl Verifier {
                 );
             }
 
-            // Verify geometric position is within bounds
-            if let Some(distance) = ptx.position.distance {
+            // Verify ring position is within bounds
+            if let Some(distance) = ptx.ring_info.distance {
                 if distance > MAX_DISTANCE {
                     tracked.invalid_indices.push(idx as u32);
                     invalid_found = true;
@@ -290,7 +290,7 @@ impl Verifier {
         let is_actually_invalid = match proof.reason {
             SlashingReason::InvalidSignature => !self.verify_signature(&ptx.tx),
             SlashingReason::InvalidStructure => {
-                ptx.position.distance.map(|d| d > MAX_DISTANCE).unwrap_or(false)
+                ptx.ring_info.distance.map(|d| d > MAX_DISTANCE).unwrap_or(false)
             }
             SlashingReason::InvalidState => {
                 // Would need to check against historical state
@@ -374,7 +374,7 @@ mod tests {
     use crate::types::MIN_STAKE;
 
     fn make_test_batch(tx_count: usize) -> Batch {
-        use crate::types::{BatchHeader, GeometricPosition, ProcessedTransaction};
+        use crate::types::{BatchHeader, ProcessedTransaction, RingInfo};
 
         let transactions: Vec<_> = (0..tx_count)
             .map(|i| {
@@ -391,11 +391,10 @@ mod tests {
                 let tx_hash = tx.hash();
                 ProcessedTransaction {
                     tx,
-                    position: GeometricPosition {
-                        tx_position: (0, 0),
-                        node_position: Some((0, 0)),
+                    ring_info: RingInfo {
+                        tx_position: 0,
+                        node_position: Some(0),
                         distance: Some(0),
-                        theta: Some(0),
                     },
                     tx_hash,
                 }
@@ -425,7 +424,8 @@ mod tests {
 
     #[test]
     fn test_optimistic_accept() {
-        let ledger = Arc::new(Ledger::new());
+        let temp_dir = format!("/tmp/pos_test_{}", rand::random::<u64>());
+        let ledger = Arc::new(Ledger::new(&temp_dir));
         // Make sequencer active
         ledger.set_balance([1u8; 32], MIN_STAKE);
         ledger.process_stake([1u8; 32], MIN_STAKE).unwrap();
@@ -444,7 +444,8 @@ mod tests {
 
     #[test]
     fn test_reject_non_sequencer() {
-        let ledger = Arc::new(Ledger::new());
+        let temp_dir = format!("/tmp/pos_test_{}", rand::random::<u64>());
+        let ledger = Arc::new(Ledger::new(&temp_dir));
         // Don't stake - not a sequencer
 
         let verifier = Verifier::new(VerifierConfig::default(), ledger);
@@ -459,7 +460,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sampled_verification() {
-        let ledger = Arc::new(Ledger::new());
+        let temp_dir = format!("/tmp/pos_test_{}", rand::random::<u64>());
+        let ledger = Arc::new(Ledger::new(&temp_dir));
         ledger.set_balance([1u8; 32], MIN_STAKE);
         ledger.process_stake([1u8; 32], MIN_STAKE).unwrap();
 

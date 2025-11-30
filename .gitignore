@@ -43,3 +43,6 @@ criterion/
 # Testing artifacts
 test_data/
 coverage/
+
+# RocksDB persistent data
+data/
