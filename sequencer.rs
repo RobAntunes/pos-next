@@ -87,7 +87,7 @@ impl Sequencer {
     /// Process a single transaction (fast path - BLAKE3 only)
     /// Returns true if accepted, false if rejected due to ring range constraints
     #[inline]
-    pub fn process_transaction(&mut self, tx: Transaction) -> bool {
+    pub fn process_transaction(&self, tx: Transaction) -> bool {
         // 1. Security Check: Verify Sender (Hash Lock)
         // This is O(1) hashing, replacing slow Ed25519 math
         if !self.verify_transaction(&tx) {
@@ -131,19 +131,19 @@ impl Sequencer {
             crate::types::SignatureType::Ed25519(_) => {
                 // Benchmark Mode: Assume Ed25519 checked by gateway/ingress
                 // Enabling this would drop TPS to ~200k.
-                true 
+                true
             }
         }
     }
 
     /// Process a batch of transactions (consumes the Vec)
-    pub fn process_batch(&mut self, txs: Vec<Transaction>) -> (usize, usize) {
+    pub fn process_batch(&self, txs: Vec<Transaction>) -> (usize, usize) {
         self.process_batch_parallel_reduce(txs)
     }
 
     /// Process a batch of transactions (optimized version - no cloning)
     /// Uses SEQUENTIAL aggregation (Consumer is already parallel)
-    pub fn process_batch_ref(&mut self, txs: &[Transaction]) -> (usize, usize) {
+    pub fn process_batch_ref(&self, txs: &[Transaction]) -> (usize, usize) {
         // let start = Instant::now();
         let total = txs.len();
         let node_pos = self.config.node_position;
@@ -151,33 +151,31 @@ impl Sequencer {
 
         // Filter and extend directly into the pending buffer
         let initial_len = self.pending.len();
-        
-        self.pending.extend(txs.iter().filter_map(|tx| {
+
+        for tx in txs {
             // 1. Security Check
             if !self.verify_transaction(tx) {
-                return None;
+                continue;
             }
 
             let tx_hash = tx.hash();
             let ring_info = Self::calculate_ring_info_stateless(&tx_hash, node_pos);
-            
+
             if ring_info.is_within_range(max_range) {
-                Some(ProcessedTransaction {
+                self.pending.push(ProcessedTransaction {
                     tx: tx.clone(), // Clone needed if we only have reference
                     ring_info,
                     tx_hash,
-                })
-            } else {
-                None
+                });
             }
-        }));
+        }
 
         let accepted = self.pending.len() - initial_len;
         (accepted, total - accepted)
     }
 
     /// SEQUENTIAL batch processing with sequential XOR reduction
-    pub fn process_batch_parallel_reduce(&mut self, txs: Vec<Transaction>) -> (usize, usize) {
+    pub fn process_batch_parallel_reduce(&self, txs: Vec<Transaction>) -> (usize, usize) {
         // let start = Instant::now();
         let total = txs.len();
         let node_pos = self.config.node_position;
@@ -185,7 +183,7 @@ impl Sequencer {
 
         // Filter and push directly
         let initial_len = self.pending.len();
-        
+
         // Since we own the Sequencer and the input Vec, we can iterate and push efficiently
         for tx in txs {
             // 1. Security Check
@@ -197,7 +195,11 @@ impl Sequencer {
             let ring_info = Self::calculate_ring_info_stateless(&tx_hash, node_pos);
 
             if ring_info.is_within_range(max_range) {
-                self.pending.push(ProcessedTransaction { tx, ring_info, tx_hash });
+                self.pending.push(ProcessedTransaction {
+                    tx,
+                    ring_info,
+                    tx_hash,
+                });
             }
         }
 
@@ -248,7 +250,8 @@ impl Sequencer {
         }
 
         // Reset count
-        self.pending_count.store(0, Ordering::Relaxed);
+        // Reset count - Not needed with SegQueue::len()
+        // self.pending_count.store(0, Ordering::Relaxed);
 
         if transactions.is_empty() {
             return None;
@@ -311,7 +314,7 @@ impl Sequencer {
 
     /// Get current pending transaction count
     pub fn pending_count(&self) -> usize {
-        self.pending_count.load(Ordering::Relaxed)
+        self.pending.len()
     }
 
     /// Get current round ID
@@ -331,7 +334,7 @@ impl Sequencer {
 
     /// Check if batch is ready to finalize
     pub fn batch_ready(&self) -> bool {
-        self.pending_count.load(Ordering::Relaxed) >= self.config.batch_size
+        self.pending.len() >= self.config.batch_size
     }
 }
 
@@ -444,9 +447,7 @@ mod tests {
 
     #[test]
     fn test_xor_validation() {
-        let hashes: Vec<_> = (0..10)
-            .map(|i| blake3::hash(&[i as u8]))
-            .collect();
+        let hashes: Vec<_> = (0..10).map(|i| blake3::hash(&[i as u8])).collect();
 
         let xor = calculate_set_xor(&hashes);
         assert!(verify_set_xor(&hashes, &xor));
@@ -469,5 +470,51 @@ mod tests {
         // This should not panic due to overflow
         let tx = make_test_tx(0);
         let _ = sequencer.process_transaction(tx);
+    }
+
+    #[test]
+    fn test_hash_reveal_verification() {
+        let config = SequencerConfig {
+            max_range: u64::MAX,
+            ..Default::default()
+        };
+        let sequencer = Sequencer::new(config);
+
+        // 1. Valid HashReveal
+        let secret = [42u8; 32];
+        let sender_hash = blake3::hash(&secret);
+        let sender = *sender_hash.as_bytes();
+
+        let tx_valid = Transaction::new_fast(
+            sender,
+            TransactionPayload::Transfer {
+                recipient: [0u8; 32],
+                amount: 100,
+                nonce: 1,
+            },
+            1,
+            0,
+            secret,
+        );
+
+        assert!(sequencer.verify_transaction(&tx_valid));
+        assert!(sequencer.process_transaction(tx_valid));
+
+        // 2. Invalid HashReveal (wrong secret)
+        let wrong_secret = [43u8; 32]; // Different secret
+        let tx_invalid = Transaction::new_fast(
+            sender, // Claiming to be 'sender' (hash of 42)
+            TransactionPayload::Transfer {
+                recipient: [0u8; 32],
+                amount: 100,
+                nonce: 2,
+            },
+            2,
+            0,
+            wrong_secret, // But revealing '43'
+        );
+
+        assert!(!sequencer.verify_transaction(&tx_invalid));
+        assert!(!sequencer.process_transaction(tx_invalid));
     }
 }

@@ -277,7 +277,7 @@ fn generate_transaction(nonce: u64) -> Transaction {
             amount: 100,
             nonce,
         },
-        [0u8; 64], // Dummy signature (not verified in fast path)
+        pos::SignatureType::Ed25519([0u8; 64]), // Dummy signature (not verified in fast path)
         nonce,
     )
 }

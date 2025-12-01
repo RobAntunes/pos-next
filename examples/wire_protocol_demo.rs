@@ -5,12 +5,12 @@
 //! 2. Using the mempool for transaction ingestion
 //! 3. Creating batch proposals
 
-use pos::{
-    Transaction, TransactionPayload, Mempool, WireMessage, 
-    SerializableTransaction, SerializableBatchHeader, PROTOCOL_VERSION,
-    messages::{serialize_message, deserialize_message},
-};
 use blake3::Hash;
+use pos::{
+    messages::{deserialize_message, serialize_message},
+    Mempool, SerializableBatchHeader, SerializableTransaction, Transaction, TransactionPayload,
+    WireMessage, PROTOCOL_VERSION,
+};
 
 fn main() {
     println!("╔══════════════════════════════════════════════════════════════╗");
@@ -34,18 +34,21 @@ fn main() {
                 amount: 1000 * (i + 1),
                 nonce: i,
             },
-            [0u8; 64],
+            pos::types::SignatureType::Ed25519([0u8; 64]),
             1234567890 + i,
         );
-        
+
         if mempool.submit(tx) {
             println!("   ✓ Transaction {} added to mempool", i);
         }
     }
-    
+
     let stats = mempool.stats();
-    println!("   📊 Mempool stats: {} pending, {:.1}% acceptance rate", 
-             stats.pending, stats.acceptance_rate * 100.0);
+    println!(
+        "   📊 Mempool stats: {} pending, {:.1}% acceptance rate",
+        stats.pending,
+        stats.acceptance_rate * 100.0
+    );
     println!();
 
     // 3. Pull a batch from mempool
@@ -57,22 +60,29 @@ fn main() {
 
     // 4. Create and serialize WireMessages
     println!("4️⃣  Testing wire protocol serialization...");
-    
+
     // Handshake message
     let handshake = WireMessage::Handshake {
         version: PROTOCOL_VERSION,
         geometric_id: [42u8; 32],
         listen_port: 9000,
     };
-    
+
     let handshake_bytes = serialize_message(&handshake).unwrap();
     println!("   ✓ Handshake serialized: {} bytes", handshake_bytes.len());
-    
+
     // Deserialize it back
     let deserialized: WireMessage = deserialize_message(&handshake_bytes).unwrap();
     match deserialized {
-        WireMessage::Handshake { version, geometric_id, listen_port } => {
-            println!("   ✓ Handshake deserialized: v{}, port {}", version, listen_port);
+        WireMessage::Handshake {
+            version,
+            geometric_id,
+            listen_port,
+        } => {
+            println!(
+                "   ✓ Handshake deserialized: v{}, port {}",
+                version, listen_port
+            );
             println!("     Geometric ID: {}...", hex::encode(&geometric_id[..8]));
         }
         _ => println!("   ✗ Wrong message type!"),
@@ -88,23 +98,34 @@ fn main() {
             amount: 5000,
             nonce: 123,
         },
-        [0u8; 64],
+        pos::types::SignatureType::Ed25519([0u8; 64]),
         1234567890,
     );
-    
-    let tx_msg = WireMessage::TransactionSubmission {
-        tx: tx.into(),
-    };
-    
+
+    let tx_msg = WireMessage::TransactionSubmission { tx: tx.into() };
+
     let tx_bytes = serialize_message(&tx_msg).unwrap();
-    println!("   ✓ Transaction message serialized: {} bytes", tx_bytes.len());
-    
+    println!(
+        "   ✓ Transaction message serialized: {} bytes",
+        tx_bytes.len()
+    );
+
     let deserialized_tx: WireMessage = deserialize_message(&tx_bytes).unwrap();
     match deserialized_tx {
         WireMessage::TransactionSubmission { tx } => {
-            println!("   ✓ Transaction deserialized: amount={}, nonce={}", 
-                     if let TransactionPayload::Transfer { amount, .. } = tx.payload { amount } else { 0 },
-                     if let TransactionPayload::Transfer { nonce, .. } = tx.payload { nonce } else { 0 });
+            println!(
+                "   ✓ Transaction deserialized: amount={}, nonce={}",
+                if let TransactionPayload::Transfer { amount, .. } = tx.payload {
+                    amount
+                } else {
+                    0
+                },
+                if let TransactionPayload::Transfer { nonce, .. } = tx.payload {
+                    nonce
+                } else {
+                    0
+                }
+            );
         }
         _ => println!("   ✗ Wrong message type!"),
     }
@@ -120,10 +141,13 @@ fn main() {
         tx_count: 10000,
         signature: [0u8; 64],
     };
-    
+
     let proposal = WireMessage::BatchProposal { header };
     let proposal_bytes = serialize_message(&proposal).unwrap();
-    println!("   ✓ Batch proposal serialized: {} bytes", proposal_bytes.len());
+    println!(
+        "   ✓ Batch proposal serialized: {} bytes",
+        proposal_bytes.len()
+    );
     println!("     (Header-only broadcast for 10k transactions)");
     println!();
 
@@ -132,7 +156,7 @@ fn main() {
     let status_req = WireMessage::MempoolStatus;
     let status_bytes = serialize_message(&status_req).unwrap();
     println!("   ✓ Mempool status request: {} bytes", status_bytes.len());
-    
+
     let status_resp = WireMessage::MempoolStatusResponse {
         pending_count: 5,
         capacity_tps: 30_000_000,

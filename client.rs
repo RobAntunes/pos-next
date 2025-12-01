@@ -87,16 +87,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     for i in 0..args.count {
-        // Create random transaction
-        let tx = Transaction::new(
-            [1u8; 32],
+        // Generate valid HashReveal credentials (Physics-bound security)
+        // Secret is derived from index (for reproducibility)
+        let secret_hash = blake3::hash(&i.to_le_bytes());
+        let secret: [u8; 32] = *secret_hash.as_bytes();
+        
+        // Sender address is the hash of the secret
+        let sender_hash = blake3::hash(&secret);
+        let sender: [u8; 32] = *sender_hash.as_bytes();
+
+        // Create transaction with HashReveal signature
+        // The sequencer will verify: hash(secret) == sender
+        let tx = Transaction::new_fast(
+            sender,
             TransactionPayload::Transfer {
                 recipient: [(i % 256) as u8; 32],
                 amount: 100,
                 nonce: i,
             },
-            SignatureType::Ed25519([0u8; 64]),
             i,
+            0,
+            secret
         );
 
         // Calculate ring position

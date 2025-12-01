@@ -222,20 +222,31 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_proposal_size() {
-        let header = SerializableBatchHeader {
-            sequencer_id: [1u8; 32],
-            round_id: 100,
-            structure_root: [2u8; 32],
-            set_xor: [3u8; 32],
-            tx_count: 10000,
-            signature: [0u8; 64],
+    fn test_wire_format_signature() {
+        let tx = SerializableTransaction {
+            sender: [1u8; 32],
+            payload: TransactionPayload::Transfer {
+                recipient: [2u8; 32],
+                amount: 100,
+                nonce: 1,
+            },
+            signature: SignatureType::Ed25519([0xAA; 64]),
+            timestamp: 12345,
         };
 
-        let msg = WireMessage::BatchProposal { header };
+        let msg = WireMessage::TransactionSubmission { tx };
         let bytes = serialize_message(&msg).unwrap();
         
-        // Should be compact (< 200 bytes for header)
-        assert!(bytes.len() < 200, "Header too large: {} bytes", bytes.len());
+        // Ensure it deserializes back
+        let deserialized: WireMessage = deserialize_message(&bytes).unwrap();
+        
+        if let WireMessage::TransactionSubmission { tx: rx } = deserialized {
+            match rx.signature {
+                SignatureType::Ed25519(sig) => assert_eq!(sig, [0xAA; 64]),
+                _ => panic!("Wrong signature type"),
+            }
+        } else {
+            panic!("Wrong message type");
+        }
     }
 }

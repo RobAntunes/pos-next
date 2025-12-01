@@ -207,18 +207,19 @@ pub struct MempoolStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::TransactionPayload;
+    use crate::types::{TransactionPayload, SignatureType};
 
     fn create_test_tx(nonce: u64) -> Transaction {
-        Transaction::new(
+        Transaction::new_fast(
             [1u8; 32],
             TransactionPayload::Transfer {
                 recipient: [2u8; 32],
                 amount: 1000,
                 nonce,
             },
-            [0u8; 64],
-            12345 + nonce,
+            nonce,           // tx nonce
+            12345 + nonce,   // timestamp
+            [0u8; 32],       // auth_secret (HashReveal)
         )
     }
 
