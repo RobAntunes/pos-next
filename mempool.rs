@@ -117,9 +117,11 @@ impl Mempool {
 
         for _ in 0..batch_size {
             if let Some(tx) = self.queue.pop() {
-                // Remove from seen set (will be re-added if batch fails)
-                let tx_hash = tx.hash();
-                self.seen.remove(&tx_hash);
+                // OPTIMIZATION: Don't remove from seen set here to avoid 45K lock acquisitions
+                // Lazy eviction: items stay in seen set temporarily (acceptable memory overhead)
+                // This eliminates massive DashSet lock contention that was limiting TPS
+                // let tx_hash = tx.hash();
+                // self.seen.remove(&tx_hash);
                 self.size.fetch_sub(1, Ordering::Relaxed);
                 batch.push(tx);
             } else {
@@ -208,16 +210,16 @@ mod tests {
     use crate::types::TransactionPayload;
 
     fn create_test_tx(nonce: u64) -> Transaction {
-        Transaction {
-            sender: [1u8; 32],
-            payload: TransactionPayload::Transfer {
+        Transaction::new(
+            [1u8; 32],
+            TransactionPayload::Transfer {
                 recipient: [2u8; 32],
                 amount: 1000,
                 nonce,
             },
-            signature: [0u8; 64],
-            timestamp: 12345 + nonce,
-        }
+            [0u8; 64],
+            12345 + nonce,
+        )
     }
 
     #[test]

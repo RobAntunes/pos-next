@@ -33,10 +33,14 @@ impl Default for Account {
 
 const ACCOUNT_SIZE: usize = 128;
 const SHARD_COUNT: usize = 256;
+// 1M accounts per shard (256 shards × 1M = 256M total capacity)
+// With 8-byte alignment (down from 64), uses ~4GB RAM instead of 32GB
 const ACCOUNTS_PER_SHARD: usize = 1_000_000;
 
 // Atomic index slot
-#[repr(C, align(64))]
+// Changed from align(64) to align(8) to reduce memory from ~32GB to ~4GB
+// The 64-byte alignment was causing 8x memory waste (64 bytes per 8-byte slot)
+#[repr(C, align(8))]
 struct AtomicSlot {
     data: AtomicU64,
 }
@@ -237,6 +241,102 @@ impl Shard {
     fn flush(&self) -> Result<(), String> {
         self.mmap.flush().map_err(|e| e.to_string())
     }
+
+    /// Batch insert - truly parallel within shard
+    /// Phase 1: Classify as updates vs inserts (parallel reads)
+    /// Phase 2: Allocate offsets for inserts (single atomic)
+    /// Phase 3: Write all accounts to mmap (parallel writes)
+    /// Phase 4: Update index entries (parallel CAS)
+    fn insert_batch(&self, updates: &[(&[u8; 32], &Account)]) -> Result<(), String> {
+        use std::sync::atomic::Ordering;
+
+        if updates.is_empty() {
+            return Ok(());
+        }
+
+        // Phase 1: Parallel classification - find existing accounts
+        let classifications: Vec<_> = updates.par_iter().map(|(pk, _)| {
+            let hash = hash_pubkey(pk);
+            let mut idx = (hash as usize) % INDEX_SIZE;
+
+            // Search for existing entry
+            for _ in 0..128 {
+                if let Some((slot_hash, offset, _)) = self.index[idx].unpack() {
+                    if slot_hash == hash {
+                        let acc = self.read_account(offset as usize);
+                        if &acc.pubkey == *pk {
+                            return (hash, idx, Some(offset)); // Update existing
+                        }
+                    }
+                } else {
+                    return (hash, idx, None); // Insert new at this slot
+                }
+                idx = (idx + 1) % INDEX_SIZE;
+            }
+            (hash, idx, None) // Insert new (fallback)
+        }).collect();
+
+        // Phase 2: Allocate offsets for new accounts (single atomic batch)
+        let insert_count = classifications.iter().filter(|(_, _, off)| off.is_none()).count();
+        let base_offset = if insert_count > 0 {
+            let offset = self.account_count.fetch_add(insert_count as u32, Ordering::Relaxed);
+            if offset + (insert_count as u32) > ACCOUNTS_PER_SHARD as u32 {
+                return Err("Shard full".to_string());
+            }
+            offset
+        } else {
+            0
+        };
+
+        // Phase 3: Compute offsets for each update (sequential to assign indices)
+        let mut insert_offset_counter = base_offset;
+        let offsets: Vec<u32> = classifications.iter().map(|(_, _, existing_offset)| {
+            if let Some(off) = existing_offset {
+                *off
+            } else {
+                let off = insert_offset_counter;
+                insert_offset_counter += 1;
+                off
+            }
+        }).collect();
+
+        // Phase 4: Parallel mmap writes
+        updates.par_iter().zip(offsets.par_iter()).for_each(|((_, acc), offset)| {
+            self.write_account(*offset as usize, acc);
+        });
+
+        // Phase 5: Parallel index updates with CAS (only for new entries)
+        classifications.par_iter().zip(offsets.par_iter()).for_each(|((hash, start_idx, existing_offset), offset)| {
+            if existing_offset.is_some() {
+                return; // Already in index, mmap write is enough
+            }
+
+            // New entry - find slot and CAS it in
+            let mut idx = *start_idx;
+            let mut distance = 0u8;
+
+            loop {
+                let slot = &self.index[idx];
+                let packed = AtomicSlot::pack(*hash, *offset, distance);
+
+                if slot.data.compare_exchange(
+                    AtomicSlot::EMPTY,
+                    packed,
+                    Ordering::Release,
+                    Ordering::Acquire
+                ).is_ok() {
+                    break;
+                }
+
+                idx = (idx + 1) % INDEX_SIZE;
+                distance += 1;
+                if distance > 127 { break; }
+            }
+        });
+
+        self.write_count.fetch_add(updates.len() as u64, Ordering::Relaxed);
+        Ok(())
+    }
 }
 
 pub struct GeometricLedger {
@@ -263,9 +363,10 @@ impl GeometricLedger {
             buckets[pk[0] as usize].push((pk, acc));
         }
 
+        // Use batch insert for each shard (parallel across shards)
         buckets.par_iter().enumerate().try_for_each(|(i, items)| {
-            for (pk, acc) in items {
-                self.shards[i].insert(pk, acc)?;
+            if !items.is_empty() {
+                self.shards[i].insert_batch(items)?;
             }
             Ok::<_, String>(())
         })

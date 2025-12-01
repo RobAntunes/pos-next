@@ -64,22 +64,54 @@ pub struct Transaction {
     pub signature: [u8; 64],
     /// Timestamp in milliseconds
     pub timestamp: u64,
+    /// Cached BLAKE3 hash (computed once at creation)
+    hash: Hash,
 }
 
 impl Transaction {
-    /// Compute the transaction hash using BLAKE3
-    pub fn hash(&self) -> Hash {
+    /// Create a new transaction with all fields and compute its hash
+    pub fn new(
+        sender: [u8; 32],
+        payload: TransactionPayload,
+        signature: [u8; 64],
+        timestamp: u64,
+    ) -> Self {
+        // Compute hash once at creation
+        let hash = Self::compute_hash(&sender, &payload, &signature, timestamp);
+
+        Self {
+            sender,
+            payload,
+            signature,
+            timestamp,
+            hash,
+        }
+    }
+
+    /// Compute the transaction hash using BLAKE3 (internal helper)
+    fn compute_hash(
+        sender: &[u8; 32],
+        payload: &TransactionPayload,
+        signature: &[u8; 64],
+        timestamp: u64,
+    ) -> Hash {
+        let payload_bytes = Self::serialize_payload(payload);
         let mut hasher = blake3::Hasher::new();
-        hasher.update(&self.sender);
-        hasher.update(&self.payload_bytes());
-        hasher.update(&self.signature);
-        hasher.update(&self.timestamp.to_le_bytes());
+        hasher.update(sender);
+        hasher.update(&payload_bytes);
+        hasher.update(signature);
+        hasher.update(&timestamp.to_le_bytes());
         hasher.finalize()
     }
 
-    /// Serialize the payload for hashing/signing
-    pub fn payload_bytes(&self) -> Vec<u8> {
-        match &self.payload {
+    /// Get the cached transaction hash (O(1) - no recomputation!)
+    pub fn hash(&self) -> Hash {
+        self.hash
+    }
+
+    /// Serialize the payload for hashing/signing (static helper)
+    fn serialize_payload(payload: &TransactionPayload) -> Vec<u8> {
+        match payload {
             TransactionPayload::Transfer { recipient, amount, nonce } => {
                 let mut bytes = vec![0u8]; // type discriminant
                 bytes.extend_from_slice(recipient);
@@ -106,6 +138,11 @@ impl Transaction {
                 bytes
             }
         }
+    }
+
+    /// Serialize the payload for hashing/signing (public interface)
+    pub fn payload_bytes(&self) -> Vec<u8> {
+        Self::serialize_payload(&self.payload)
     }
 
     /// Get the message that should be signed

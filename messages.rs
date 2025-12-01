@@ -140,12 +140,12 @@ impl From<Transaction> for SerializableTransaction {
 
 impl From<SerializableTransaction> for Transaction {
     fn from(tx: SerializableTransaction) -> Self {
-        Self {
-            sender: tx.sender,
-            payload: tx.payload,
-            signature: tx.signature,
-            timestamp: tx.timestamp,
-        }
+        Transaction::new(
+            tx.sender,
+            tx.payload,
+            tx.signature,
+            tx.timestamp,
+        )
     }
 }
 

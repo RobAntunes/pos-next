@@ -33,26 +33,26 @@ fn main() {
 
         // Create transactions
         let transactions = vec![
-            Transaction {
-                sender: alice,
-                payload: TransactionPayload::Transfer {
+            Transaction::new(
+                alice,
+                TransactionPayload::Transfer {
                     recipient: bob,
                     amount: 3_000,
                     nonce: 0,
                 },
-                signature: [0u8; 64],
-                timestamp: 1234567890,
-            },
-            Transaction {
-                sender: alice,
-                payload: TransactionPayload::Transfer {
+                [0u8; 64],
+                1234567890,
+            ),
+            Transaction::new(
+                alice,
+                TransactionPayload::Transfer {
                     recipient: charlie,
                     amount: 2_000,
                     nonce: 1,
                 },
-                signature: [0u8; 64],
-                timestamp: 1234567891,
-            },
+                [0u8; 64],
+                1234567891,
+            ),
         ];
 
         // Apply batch (this will persist to RocksDB)

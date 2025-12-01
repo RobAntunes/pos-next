@@ -378,16 +378,16 @@ mod tests {
 
         let transactions: Vec<_> = (0..tx_count)
             .map(|i| {
-                let tx = Transaction {
-                    sender: [1u8; 32],
-                    payload: TransactionPayload::Transfer {
+                let tx = Transaction::new(
+                    [1u8; 32],
+                    TransactionPayload::Transfer {
                         recipient: [2u8; 32],
                         amount: 100,
                         nonce: i as u64,
                     },
-                    signature: [0u8; 64],
-                    timestamp: i as u64,
-                };
+                    [0u8; 64],
+                    i as u64,
+                );
                 let tx_hash = tx.hash();
                 ProcessedTransaction {
                     tx,

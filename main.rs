@@ -270,16 +270,16 @@ fn generate_random_id() -> [u8; 32] {
 
 /// Generate a test transaction
 fn generate_transaction(nonce: u64) -> Transaction {
-    Transaction {
-        sender: [1u8; 32],
-        payload: TransactionPayload::Transfer {
+    Transaction::new(
+        [1u8; 32],
+        TransactionPayload::Transfer {
             recipient: [2u8; 32],
             amount: 100,
             nonce,
         },
-        signature: [0u8; 64], // Dummy signature (not verified in fast path)
-        timestamp: nonce,
-    }
+        [0u8; 64], // Dummy signature (not verified in fast path)
+        nonce,
+    )
 }
 
 /// Format a number with comma separators

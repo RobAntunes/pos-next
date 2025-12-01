@@ -27,16 +27,16 @@ fn main() {
     // 2. Create and submit transactions
     println!("2️⃣  Creating and submitting transactions...");
     for i in 0..10 {
-        let tx = Transaction {
-            sender: [i as u8; 32],
-            payload: TransactionPayload::Transfer {
+        let tx = Transaction::new(
+            [i as u8; 32],
+            TransactionPayload::Transfer {
                 recipient: [(i + 1) as u8; 32],
                 amount: 1000 * (i + 1),
                 nonce: i,
             },
-            signature: [0u8; 64],
-            timestamp: 1234567890 + i,
-        };
+            [0u8; 64],
+            1234567890 + i,
+        );
         
         if mempool.submit(tx) {
             println!("   ✓ Transaction {} added to mempool", i);

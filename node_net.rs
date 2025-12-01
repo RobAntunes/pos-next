@@ -64,7 +64,7 @@ struct Args {
     
     /// Generate valid geometric positions (100% acceptance rate)
     /// Without this flag, random positions are generated (~20% acceptance)
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = false)]
     smart_gen: bool,
     
     /// Maximum mempool size (default: 10M transactions)
@@ -174,20 +174,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Producer Loop: Generate test transactions and submit to mempool
     if args.producer {
-        // Pre-mint balance for the sender account to avoid failures
-        ledger.mint(node_id, u64::MAX / 2);
-        info!("💰 Pre-minted balance for sender: {}", hex::encode(&node_id[..8]));
+        // Pre-mint balance for hash-derived sender accounts (uniform distribution)
+        // Hash-derived senders will have their first byte uniformly distributed 0-255
+        for i in 0..10000u64 {
+            let sender_seed = i.to_le_bytes();
+            let sender_hash = blake3::hash(&sender_seed);
+            let sender_addr = *sender_hash.as_bytes();
+            ledger.mint(sender_addr, u64::MAX / 10000);
+        }
+        info!("💰 Pre-minted balance for 10K hash-derived senders (uniform shard distribution)");
 
-        let mempool_producer = mempool.clone();
-        let tps = args.tps;
-        let node_id_producer = node_id;
-        let smart_gen = args.smart_gen;
+        // Spawn multiple parallel producers for maximum throughput
+        let num_producers = num_cpus::get();
+        let tps_per_producer = args.tps / num_producers as u64;
 
-        tokio::spawn(async move {
-            producer_loop(mempool_producer, tps, node_id_producer, smart_gen).await;
-        });
+        for producer_id in 0..num_producers {
+            let mempool_producer = mempool.clone();
+            let node_id_producer = node_id;
+            let smart_gen = args.smart_gen;
 
-        info!("✅ Producer loop started (target: {} TPS, smart_gen: {})", args.tps, args.smart_gen);
+            tokio::spawn(async move {
+                producer_loop(mempool_producer, tps_per_producer, node_id_producer, smart_gen, producer_id).await;
+            });
+        }
+
+        info!("✅ {} Producer loops started (target: {} TPS total, {} TPS each, smart_gen: {})",
+              num_producers, args.tps, tps_per_producer, args.smart_gen);
     }
     
     // Consumer Loop: Pull from mempool, create batches, broadcast
@@ -561,13 +573,15 @@ async fn producer_loop(
     target_tps: u64,
     sender_id: [u8; 32],
     smart_gen: bool,
+    producer_id: usize,
 ) {
     use std::time::Instant;
     use rand::{Rng, SeedableRng};
     use rand::rngs::StdRng;
     use pos::MAX_DISTANCE;
-    
-    let mut nonce: u64 = 0;
+
+    // Offset nonce by producer_id to ensure each producer generates different transactions
+    let mut nonce: u64 = (producer_id as u64) * 100_000_000;
     let mut last_report = Instant::now();
     let mut produced_since_report: u64 = 0;
     
@@ -585,10 +599,10 @@ async fn producer_loop(
     let node_hash = blake3::hash(b"default-sequencer-node");
     let node_position = pos::calculate_ring_position(&node_hash);
 
-    info!("🏭 Producer starting: {} TPS target (bursts of {}, {}ms interval, smart_gen: {})",
-          target_tps, burst_size, interval_ms, smart_gen);
+    info!("🏭 Producer #{} starting: {} TPS target (bursts of {}, {}ms interval, smart_gen: {})",
+          producer_id, target_tps, burst_size, interval_ms, smart_gen);
 
-    if smart_gen {
+    if smart_gen && producer_id == 0 {
         info!("🎯 Smart generation enabled - targeting node ring position {}", node_position);
     }
     
@@ -614,19 +628,30 @@ async fn producer_loop(
             let mut i = 0usize;
             let mut attempts = 0u64;
             while i < burst_size {
+                // Generate sender address by hashing - cycle through 10K pre-minted senders
+                // This ensures uniform distribution while reusing accounts with balance
+                let sender_id = (current_nonce + i as u64) % 10000;
+                let sender_seed = sender_id.to_le_bytes();
+                let sender_hash = blake3::hash(&sender_seed);
+                let sender = *sender_hash.as_bytes();
+
                 let mut recipient = [0u8; 32];
                 rng_clone.fill(&mut recipient);
 
-                let tx = Transaction {
-                    sender: sender_id,
-                    payload: TransactionPayload::Transfer {
+                // Calculate per-sender nonce: since we cycle through 10K senders,
+                // each sender's nonce is the number of times we've used it
+                let sender_nonce = (current_nonce + i as u64) / 10000;
+
+                let tx = Transaction::new(
+                    sender,
+                    TransactionPayload::Transfer {
                         recipient,
                         amount: rng_clone.gen_range(1..10000),
-                        nonce: current_nonce + i as u64,
+                        nonce: sender_nonce,
                     },
-                    signature: [0u8; 64],
-                    timestamp: timestamp + i as u64,
-                };
+                    [0u8; 64],
+                    timestamp + i as u64,
+                );
 
                 attempts += 1;
 
@@ -665,11 +690,11 @@ async fn producer_loop(
         nonce += burst_size as u64;
         produced_since_report += submitted;
         
-        // Report every 5 seconds
-        if last_report.elapsed() >= Duration::from_secs(5) {
+        // Report every 5 seconds (only from producer 0 to avoid log spam)
+        if producer_id == 0 && last_report.elapsed() >= Duration::from_secs(5) {
             let actual_tps = produced_since_report as f64 / last_report.elapsed().as_secs_f64();
-            info!("🏭 Producer: {} tx/s (target: {}), mempool: {} pending", 
-                  actual_tps as u64, target_tps, mempool.size());
+            info!("🏭 Producer #{}: {} tx/s (target: {}), mempool: {} pending",
+                  producer_id, actual_tps as u64, target_tps, mempool.size());
             produced_since_report = 0;
             last_report = Instant::now();
         }
@@ -712,9 +737,14 @@ fn consumer_loop_blocking(
         // Tight loop - no async overhead
         let pending = mempool.size();
 
-        if pending >= batch_size {
-            // Pull full batch for maximum efficiency
-            let txs = mempool.pull_batch(batch_size);
+        // Pull when we have enough transactions for efficient processing
+        // Don't wait for exactly batch_size - pull whenever we have a reasonable amount
+        let min_batch = batch_size / 10;  // Pull at 10% threshold (4.5k for 45k batch)
+
+        if pending >= min_batch {
+            // Pull up to batch_size for maximum efficiency
+            let pull_size = pending.min(batch_size);
+            let txs = mempool.pull_batch(pull_size);
 
             if !txs.is_empty() {
                 let batch_start = Instant::now();
@@ -735,8 +765,8 @@ fn consumer_loop_blocking(
                         0
                     };
 
-                    // Send batch to async ledger worker (non-blocking)
-                    // If channel is full, this will block briefly
+                    // Send batch to async ledger worker
+                    // This will block if channel is full (back-pressure)
                     if let Err(e) = batch_sender.send(batch) {
                         tracing::error!("Failed to send batch to ledger worker: {}", e);
                     }
@@ -753,11 +783,11 @@ fn consumer_loop_blocking(
                 }
             }
         } else if pending > 0 {
-            // Small number of transactions - yield to avoid busy-wait
-            std::thread::sleep(Duration::from_micros(100));
+            // Small number of transactions - yield briefly
+            std::thread::sleep(Duration::from_micros(10));
         } else {
-            // Empty mempool - sleep a bit longer
-            std::thread::sleep(Duration::from_millis(1));
+            // Empty mempool - yield to avoid spinning
+            std::thread::sleep(Duration::from_micros(100));
         }
 
         // Report every 5 seconds

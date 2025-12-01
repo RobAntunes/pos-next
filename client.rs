@@ -88,16 +88,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for i in 0..args.count {
         // Create random transaction
-        let tx = Transaction {
-            sender: [1u8; 32],
-            payload: TransactionPayload::Transfer {
+        let tx = Transaction::new(
+            [1u8; 32],
+            TransactionPayload::Transfer {
                 recipient: [(i % 256) as u8; 32],
                 amount: 100,
                 nonce: i,
             },
-            signature: [0u8; 64],
-            timestamp: i,
-        };
+            [0u8; 64],
+            i,
+        );
 
         // Calculate ring position
         let tx_hash = tx.hash();
