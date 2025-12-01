@@ -95,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 amount: 100,
                 nonce: i,
             },
-            [0u8; 64],
+            SignatureType::Ed25519([0u8; 64]),
             i,
         );
 
