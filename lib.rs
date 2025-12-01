@@ -14,9 +14,9 @@ pub use protocol::{TangleProtocol, Commitment};
 pub use metrics::NodeMetrics;
 pub use types::{
     Transaction, TransactionPayload, ProcessedTransaction, RingInfo, RingPosition,
-    Batch, BatchHeader, MAX_DISTANCE, DEFAULT_BATCH_SIZE,
+    Batch, BatchHeader, SignatureType, MAX_DISTANCE, DEFAULT_BATCH_SIZE,
 };
-pub use geometric_ledger::{GeometricLedger, Account};
+pub use geometric_ledger::{GeometricLedger, Account, VerifyResult};
 pub use sequencer::{Sequencer, SequencerConfig};
 pub use round::{RoundManager, RoundConfig, RoundMetrics};
 pub use messages::{WireMessage, SerializableBatchHeader, SerializableTransaction, PROTOCOL_VERSION};

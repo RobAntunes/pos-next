@@ -87,16 +87,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     for i in 0..args.count {
-        // Create random transaction
-        let tx = Transaction::new(
+        // Create random transaction (fast-path for high throughput)
+        let tx = Transaction::new_fast(
             [1u8; 32],
             TransactionPayload::Transfer {
                 recipient: [(i % 256) as u8; 32],
                 amount: 100,
                 nonce: i,
             },
-            [0u8; 64],
-            i,
+            i,           // tx nonce
+            i,           // timestamp
+            [0u8; 32],   // auth_secret (HashReveal)
         );
 
         // Calculate ring position

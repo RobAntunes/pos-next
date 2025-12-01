@@ -10,14 +10,24 @@ use std::sync::Mutex;
 use rayon::prelude::*;
 
 // Fixed-size account (pad to 128 bytes)
+// Layout: pubkey(32) + balance(8) + nonce(8) + last_modified(8) + auth_root(32) + padding(40) = 128
 #[repr(C, align(128))]
 #[derive(Copy, Clone, Debug)]
 pub struct Account {
+    /// Public key (Ed25519)
     pub pubkey: [u8; 32],
+    /// Token balance
     pub balance: u64,
+    /// Transaction nonce (increments with each tx)
     pub nonce: u64,
+    /// Last modification timestamp
     pub last_modified: u64,
-    pub _padding: [u8; 80],
+    /// Current tip of the hash chain (for fast-path auth)
+    /// This is updated after each HashReveal verification:
+    /// auth_root = revealed_secret
+    pub auth_root: [u8; 32],
+    /// Padding to maintain 128-byte alignment
+    pub _padding: [u8; 40],
 }
 
 impl Default for Account {
@@ -27,14 +37,137 @@ impl Default for Account {
             balance: 0,
             nonce: 0,
             last_modified: 0,
-            _padding: [0u8; 80],
+            auth_root: [0u8; 32],
+            _padding: [0u8; 40],
         }
+    }
+}
+
+/// Transaction verification result
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyResult {
+    /// Transaction is valid
+    Valid,
+    /// Invalid nonce (replay or out of sequence)
+    InvalidNonce,
+    /// Hash chain verification failed
+    InvalidHashReveal,
+    /// Ed25519 signature verification failed  
+    InvalidSignature,
+    /// Insufficient balance for transfer
+    InsufficientBalance,
+    /// Account not found
+    AccountNotFound,
+}
+
+impl Account {
+    /// Verify a transaction against this account (FAST PATH: ~15ns for HashReveal)
+    /// 
+    /// Verification order:
+    /// 1. Nonce check (replay protection) - O(1)
+    /// 2. Signature verification:
+    ///    - HashReveal: blake3(reveal) == auth_root - O(1), ~15ns
+    ///    - Ed25519: full signature verification - O(1), ~50,000ns
+    #[inline]
+    pub fn verify_transaction(&self, tx: &crate::types::Transaction) -> VerifyResult {
+        use crate::types::SignatureType;
+        
+        // 1. Nonce check (replay protection)
+        // Transaction nonce must be exactly account.nonce + 1
+        if tx.nonce != self.nonce + 1 {
+            return VerifyResult::InvalidNonce;
+        }
+        
+        // 2. Signature verification based on type
+        match &tx.signature {
+            SignatureType::HashReveal(revealed_secret) => {
+                // FAST PATH: ~15ns
+                // Verify: blake3(revealed_secret) == stored auth_root
+                let calculated_root = blake3::hash(revealed_secret);
+                if calculated_root.as_bytes() != &self.auth_root {
+                    return VerifyResult::InvalidHashReveal;
+                }
+            }
+            SignatureType::Ed25519(signature) => {
+                // SLOW PATH: ~50,000ns
+                // Full Ed25519 verification against pubkey
+                use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+                
+                let Ok(verifying_key) = VerifyingKey::from_bytes(&self.pubkey) else {
+                    return VerifyResult::InvalidSignature;
+                };
+                // Signature::from_slice returns Result, from_bytes takes &[u8; 64] directly
+                let sig = Signature::from_bytes(signature);
+                
+                let message = tx.signing_message();
+                if verifying_key.verify(&message, &sig).is_err() {
+                    return VerifyResult::InvalidSignature;
+                }
+            }
+        }
+        
+        VerifyResult::Valid
+    }
+    
+    /// Apply a verified transaction to this account
+    /// Returns the new account state
+    /// 
+    /// IMPORTANT: Call verify_transaction() first!
+    pub fn apply_transaction(&self, tx: &crate::types::Transaction, timestamp: u64) -> Result<Account, VerifyResult> {
+        use crate::types::{SignatureType, TransactionPayload};
+        
+        let mut new_account = *self;
+        new_account.nonce = tx.nonce;
+        new_account.last_modified = timestamp;
+        
+        // Update auth_root based on signature type
+        match &tx.signature {
+            SignatureType::HashReveal(revealed_secret) => {
+                // Rotate auth_root to the revealed secret
+                // Next tx must reveal preimage of this secret
+                new_account.auth_root = *revealed_secret;
+            }
+            SignatureType::Ed25519(_) => {
+                // Ed25519 transactions can optionally set a new auth_root
+                // This is the "refueling" operation
+                // For now, we don't change auth_root on Ed25519 txs
+                // A separate SetAuthRoot payload type could be added
+            }
+        }
+        
+        // Apply payload effects
+        match &tx.payload {
+            TransactionPayload::Transfer { amount, .. } => {
+                if new_account.balance < *amount {
+                    return Err(VerifyResult::InsufficientBalance);
+                }
+                new_account.balance -= *amount;
+            }
+            TransactionPayload::SetAuthRoot { new_auth_root } => {
+                // Refueling: set new auth_root for future fast-path transactions
+                // This must be an Ed25519 signed transaction
+                new_account.auth_root = *new_auth_root;
+            }
+        }
+        
+        Ok(new_account)
+    }
+    
+    /// Initialize auth_root from a seed (for account creation)
+    /// Computes H^n(seed) where n = chain_length
+    /// Returns the commitment (H^0) that should be stored as auth_root
+    pub fn initialize_auth_chain(seed: &[u8; 32], chain_length: u32) -> [u8; 32] {
+        let mut current = *seed;
+        for _ in 0..chain_length {
+            current = *blake3::hash(&current).as_bytes();
+        }
+        current
     }
 }
 
 const ACCOUNT_SIZE: usize = 128;
 const SHARD_COUNT: usize = 256;
-const ACCOUNTS_PER_SHARD: usize = 1_000_000;
+const ACCOUNTS_PER_SHARD: usize = 10_000;
 
 // Atomic index slot
 // OPTIMIZATION: align(64) for cache line alignment - prevents false sharing between adjacent slots

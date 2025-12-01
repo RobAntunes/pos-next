@@ -24,18 +24,19 @@ fn main() {
     println!("   ✓ Mempool initialized (max size: 100k transactions)");
     println!();
 
-    // 2. Create and submit transactions
+    // 2. Create and submit transactions (using fast-path HashReveal)
     println!("2️⃣  Creating and submitting transactions...");
     for i in 0..10 {
-        let tx = Transaction::new(
-            [i as u8; 32],
+        let tx = Transaction::new_fast(
+            [i as u8; 32],  // sender
             TransactionPayload::Transfer {
                 recipient: [(i + 1) as u8; 32],
                 amount: 1000 * (i + 1),
                 nonce: i,
             },
-            [0u8; 64],
-            1234567890 + i,
+            i,               // tx nonce
+            1234567890 + i,  // timestamp
+            [0u8; 32],       // auth_secret (HashReveal)
         );
         
         if mempool.submit(tx) {
@@ -79,17 +80,18 @@ fn main() {
     }
     println!();
 
-    // Transaction submission message
+    // Transaction submission message (fast-path HashReveal)
     println!("5️⃣  Testing transaction submission message...");
-    let tx = Transaction::new(
-        [1u8; 32],
+    let tx = Transaction::new_fast(
+        [1u8; 32],  // sender
         TransactionPayload::Transfer {
             recipient: [2u8; 32],
             amount: 5000,
             nonce: 123,
         },
-        [0u8; 64],
-        1234567890,
+        123,         // tx nonce
+        1234567890,  // timestamp
+        [0u8; 32],   // auth_secret (HashReveal)
     );
     
     let tx_msg = WireMessage::TransactionSubmission {

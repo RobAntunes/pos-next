@@ -644,15 +644,16 @@ async fn producer_loop(
                 // each sender's nonce is the number of times we've used it
                 let sender_nonce = (current_nonce + i as u64) / 10000;
 
-                let tx = Transaction::new(
+                let tx = Transaction::new_fast(
                     sender,
                     TransactionPayload::Transfer {
                         recipient,
                         amount: rng_clone.gen_range(1..10000),
                         nonce: sender_nonce,
                     },
-                    [0u8; 64],
-                    timestamp + i as u64,
+                    sender_nonce,         // tx nonce
+                    timestamp + i as u64, // timestamp
+                    [0u8; 32],            // auth_secret (HashReveal for fast path)
                 );
 
                 attempts += 1;

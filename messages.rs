@@ -9,7 +9,7 @@ use blake3::Hash;
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
-use crate::types::{BatchHeader, Transaction, TransactionPayload};
+use crate::types::{BatchHeader, SignatureType, Transaction, TransactionPayload};
 
 /// Network protocol version
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -117,14 +117,41 @@ impl From<SerializableBatchHeader> for BatchHeader {
     }
 }
 
+/// Serializable signature type
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum SerializableSignature {
+    /// Ed25519 signature (64 bytes)
+    Ed25519(#[serde(with = "BigArray")] [u8; 64]),
+    /// Hash chain pre-image reveal (32 bytes)
+    HashReveal([u8; 32]),
+}
+
+impl From<SignatureType> for SerializableSignature {
+    fn from(sig: SignatureType) -> Self {
+        match sig {
+            SignatureType::Ed25519(s) => SerializableSignature::Ed25519(s),
+            SignatureType::HashReveal(r) => SerializableSignature::HashReveal(r),
+        }
+    }
+}
+
+impl From<SerializableSignature> for SignatureType {
+    fn from(sig: SerializableSignature) -> Self {
+        match sig {
+            SerializableSignature::Ed25519(s) => SignatureType::Ed25519(s),
+            SerializableSignature::HashReveal(r) => SignatureType::HashReveal(r),
+        }
+    }
+}
+
 /// Serializable version of Transaction (bincode-compatible)
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SerializableTransaction {
     pub sender: [u8; 32],
     pub payload: TransactionPayload,
-    #[serde(with = "BigArray")]
-    pub signature: [u8; 64],
+    pub nonce: u64,
     pub timestamp: u64,
+    pub signature: SerializableSignature,
 }
 
 impl From<Transaction> for SerializableTransaction {
@@ -132,8 +159,9 @@ impl From<Transaction> for SerializableTransaction {
         Self {
             sender: tx.sender,
             payload: tx.payload,
-            signature: tx.signature,
+            nonce: tx.nonce,
             timestamp: tx.timestamp,
+            signature: tx.signature.into(),
         }
     }
 }
@@ -143,8 +171,9 @@ impl From<SerializableTransaction> for Transaction {
         Transaction::new(
             tx.sender,
             tx.payload,
-            tx.signature,
+            tx.nonce,
             tx.timestamp,
+            tx.signature.into(),
         )
     }
 }
@@ -197,6 +226,7 @@ mod tests {
 
     #[test]
     fn test_transaction_roundtrip() {
+        // Test fast-path HashReveal signature
         let tx = SerializableTransaction {
             sender: [1u8; 32],
             payload: TransactionPayload::Transfer {
@@ -204,8 +234,9 @@ mod tests {
                 amount: 1000,
                 nonce: 1,
             },
-            signature: [0u8; 64],
+            nonce: 1,
             timestamp: 12345,
+            signature: SerializableSignature::HashReveal([0u8; 32]),
         };
 
         let msg = WireMessage::TransactionSubmission { tx: tx.clone() };
@@ -216,6 +247,35 @@ mod tests {
             WireMessage::TransactionSubmission { tx: tx2 } => {
                 assert_eq!(tx.sender, tx2.sender);
                 assert_eq!(tx.timestamp, tx2.timestamp);
+                assert_eq!(tx.nonce, tx2.nonce);
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+    
+    #[test]
+    fn test_ed25519_signature_roundtrip() {
+        // Test slow-path Ed25519 signature
+        let tx = SerializableTransaction {
+            sender: [1u8; 32],
+            payload: TransactionPayload::Transfer {
+                recipient: [2u8; 32],
+                amount: 1000,
+                nonce: 1,
+            },
+            nonce: 1,
+            timestamp: 12345,
+            signature: SerializableSignature::Ed25519([0u8; 64]),
+        };
+
+        let msg = WireMessage::TransactionSubmission { tx: tx.clone() };
+        let bytes = serialize_message(&msg).unwrap();
+        let deserialized: WireMessage = deserialize_message(&bytes).unwrap();
+
+        match deserialized {
+            WireMessage::TransactionSubmission { tx: tx2 } => {
+                assert_eq!(tx.sender, tx2.sender);
+                matches!(tx2.signature, SerializableSignature::Ed25519(_));
             }
             _ => panic!("Wrong message type"),
         }

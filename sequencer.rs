@@ -356,15 +356,17 @@ mod tests {
     use crate::types::TransactionPayload;
 
     fn make_test_tx(nonce: u64) -> Transaction {
-        Transaction::new(
-            [1u8; 32],
+        // Use fast-path HashReveal for high-frequency testing
+        Transaction::new_fast(
+            [1u8; 32],  // sender
             TransactionPayload::Transfer {
                 recipient: [2u8; 32],
                 amount: 100,
                 nonce,
             },
-            [0u8; 64],
-            nonce,
+            nonce,           // tx nonce
+            nonce,           // timestamp
+            [0u8; 32],       // auth_secret (HashReveal)
         )
     }
 

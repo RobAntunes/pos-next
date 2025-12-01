@@ -268,17 +268,18 @@ fn generate_random_id() -> [u8; 32] {
     id
 }
 
-/// Generate a test transaction
+/// Generate a test transaction (uses fast-path HashReveal for maximum TPS)
 fn generate_transaction(nonce: u64) -> Transaction {
-    Transaction::new(
+    Transaction::new_fast(
         [1u8; 32],
         TransactionPayload::Transfer {
             recipient: [2u8; 32],
             amount: 100,
             nonce,
         },
-        [0u8; 64], // Dummy signature (not verified in fast path)
-        nonce,
+        nonce,       // tx nonce
+        nonce,       // timestamp
+        [0u8; 32],   // auth_secret (HashReveal - ~15ns verification)
     )
 }
 
