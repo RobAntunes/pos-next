@@ -250,7 +250,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!();
-    println!("📡 Scanning for peers on the local network...");
+    println!("🌐 Starting Geometric Turbine Network Test...");
+    println!("🚀 VERSION: HASH_REVEAL_DEBUG_v2 (Manual Peering + Logging)");
     println!();
 
     // Manual Peering
