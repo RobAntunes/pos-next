@@ -112,8 +112,8 @@ impl Sequencer {
         self.pending.push(processed);
         self.pending_count.fetch_add(1, Ordering::Relaxed);
 
-        // Record metrics
-        self.metrics.write().record_batch(1, start.elapsed());
+        // Record metrics REMOVED
+        // self.metrics.write().record_batch(1, start.elapsed());
 
         true
     }
@@ -124,15 +124,15 @@ impl Sequencer {
     }
 
     /// Process a batch of transactions (optimized version - no cloning)
-    /// Uses LOCK-FREE aggregation via Rayon Map-Reduce
+    /// Uses SEQUENTIAL aggregation (Consumer is already parallel)
     pub fn process_batch_ref(&self, txs: &[Transaction]) -> (usize, usize) {
-        let start = Instant::now();
+        // let start = Instant::now();
         let total = txs.len();
         let node_pos = self.config.node_position;
         let max_range = self.config.max_range;
 
         // Map-Reduce: Just count accepted/rejected, don't store transactions
-        let accepted_count = txs.par_iter()
+        let accepted_count = txs.iter()
             .filter(|tx| {
                 let tx_hash = tx.hash();
                 let ring_info = Self::calculate_ring_info_stateless(&tx_hash, node_pos);
@@ -140,22 +140,23 @@ impl Sequencer {
             })
             .count();
 
-        // Record metrics
-        self.metrics.write().record_batch(accepted_count as u64, start.elapsed());
+        // Record metrics REMOVED (Lock contention)
+        // self.metrics.write().record_batch(accepted_count as u64, start.elapsed());
 
         (accepted_count, total - accepted_count)
     }
 
-    /// PARALLEL batch processing with parallel XOR reduction
+    /// SEQUENTIAL batch processing with sequential XOR reduction
     pub fn process_batch_parallel_reduce(&self, txs: Vec<Transaction>) -> (usize, usize) {
-        let start = Instant::now();
+        // let start = Instant::now();
         let total = txs.len();
         let node_pos = self.config.node_position;
         let max_range = self.config.max_range;
 
-        // PARALLEL: Process all transactions
+        // SEQUENTIAL: Process all transactions
+        // Since consumers are already parallel (N threads), adding Rayon here would oversubscribe
         let new_pending: Vec<ProcessedTransaction> = txs
-            .into_par_iter()
+            .into_iter()
             .filter_map(|tx| {
                 let tx_hash = tx.hash();
                 let ring_info = Self::calculate_ring_info_stateless(&tx_hash, node_pos);
@@ -176,7 +177,7 @@ impl Sequencer {
         }
         self.pending_count.fetch_add(accepted, Ordering::Relaxed);
 
-        self.metrics.write().record_batch(accepted as u64, start.elapsed());
+        // self.metrics.write().record_batch(accepted as u64, start.elapsed());
 
         (accepted, total - accepted)
     }

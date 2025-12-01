@@ -9,7 +9,7 @@ use blake3::Hash;
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
-use crate::types::{BatchHeader, Transaction, TransactionPayload};
+use crate::types::{BatchHeader, Transaction, TransactionPayload, SignatureType};
 
 /// Network protocol version
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -122,8 +122,7 @@ impl From<SerializableBatchHeader> for BatchHeader {
 pub struct SerializableTransaction {
     pub sender: [u8; 32],
     pub payload: TransactionPayload,
-    #[serde(with = "BigArray")]
-    pub signature: [u8; 64],
+    pub signature: SignatureType,
     pub timestamp: u64,
 }
 
@@ -140,12 +139,28 @@ impl From<Transaction> for SerializableTransaction {
 
 impl From<SerializableTransaction> for Transaction {
     fn from(tx: SerializableTransaction) -> Self {
-        Transaction::new(
-            tx.sender,
-            tx.payload,
-            tx.signature,
-            tx.timestamp,
-        )
+        // Re-create transaction (recomputes hash eagerly)
+        match tx.signature {
+            SignatureType::Ed25519(sig) => Transaction::new(
+                tx.sender,
+                tx.payload,
+                sig,
+                tx.timestamp
+            ),
+            SignatureType::HashReveal(secret) => {
+                 // Extract nonce from payload to call new_fast
+                 let nonce = match &tx.payload {
+                     TransactionPayload::Transfer { nonce, .. } => *nonce,
+                 };
+                 Transaction::new_fast(
+                    tx.sender,
+                    tx.payload,
+                    nonce,
+                    tx.timestamp,
+                    secret
+                )
+            }
+        }
     }
 }
 
@@ -204,7 +219,7 @@ mod tests {
                 amount: 1000,
                 nonce: 1,
             },
-            signature: [0u8; 64],
+            signature: SignatureType::Ed25519([0u8; 64]),
             timestamp: 12345,
         };
 

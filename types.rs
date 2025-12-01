@@ -5,6 +5,7 @@
 
 use blake3::Hash;
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 
 /// Maximum geometric distance for transaction acceptance
 pub const MAX_DISTANCE: u64 = u64::MAX / 4;
@@ -26,6 +27,16 @@ pub enum TransactionPayload {
     },
 }
 
+/// Signature type for transaction authentication
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SignatureType {
+    /// Standard Ed25519 signature (slow, secure)
+    Ed25519(#[serde(with = "BigArray")] [u8; 64]),
+    /// Hash reveal signature (fast, for high-throughput testing)
+    /// Reveals the pre-image of a committed hash
+    HashReveal([u8; 32]),
+}
+
 /// Raw transaction before processing
 #[derive(Debug, Clone)]
 pub struct Transaction {
@@ -33,30 +44,61 @@ pub struct Transaction {
     pub sender: [u8; 32],
     /// Transaction payload
     pub payload: TransactionPayload,
-    /// Ed25519 signature over (sender || payload_hash)
-    pub signature: [u8; 64],
+    /// Transaction nonce
+    pub nonce: u64,
     /// Timestamp in milliseconds
     pub timestamp: u64,
+    /// Signature (Ed25519 or HashReveal)
+    pub signature: SignatureType,
     /// Cached BLAKE3 hash (computed once at creation)
     hash: Hash,
 }
 
 impl Transaction {
-    /// Create a new transaction with all fields and compute its hash
+    /// Create a new transaction with Ed25519 signature
     pub fn new(
         sender: [u8; 32],
         payload: TransactionPayload,
         signature: [u8; 64],
         timestamp: u64,
     ) -> Self {
-        // Compute hash once at creation
-        let hash = Self::compute_hash(&sender, &payload, &signature, timestamp);
+        let nonce = match &payload {
+            TransactionPayload::Transfer { nonce, .. } => *nonce,
+        };
+        let sig_type = SignatureType::Ed25519(signature);
+        
+        // Compute hash eagerly
+        let hash = Self::compute_hash(&sender, &payload, nonce, timestamp, &sig_type);
 
         Self {
             sender,
             payload,
-            signature,
+            nonce,
             timestamp,
+            signature: sig_type,
+            hash,
+        }
+    }
+
+    /// Create a new high-performance transaction (HashReveal)
+    pub fn new_fast(
+        sender: [u8; 32],
+        payload: TransactionPayload,
+        nonce: u64,
+        timestamp: u64,
+        secret: [u8; 32],
+    ) -> Self {
+        let sig_type = SignatureType::HashReveal(secret);
+        
+        // Compute hash eagerly
+        let hash = Self::compute_hash(&sender, &payload, nonce, timestamp, &sig_type);
+
+        Self {
+            sender,
+            payload,
+            nonce,
+            timestamp,
+            signature: sig_type,
             hash,
         }
     }
@@ -65,15 +107,22 @@ impl Transaction {
     fn compute_hash(
         sender: &[u8; 32],
         payload: &TransactionPayload,
-        signature: &[u8; 64],
+        nonce: u64,
         timestamp: u64,
+        signature: &SignatureType,
     ) -> Hash {
         let payload_bytes = Self::serialize_payload(payload);
         let mut hasher = blake3::Hasher::new();
         hasher.update(sender);
         hasher.update(&payload_bytes);
-        hasher.update(signature);
+        hasher.update(&nonce.to_le_bytes());
         hasher.update(&timestamp.to_le_bytes());
+        
+        match signature {
+            SignatureType::Ed25519(sig) => hasher.update(sig),
+            SignatureType::HashReveal(secret) => hasher.update(secret),
+        };
+        
         hasher.finalize()
     }
 

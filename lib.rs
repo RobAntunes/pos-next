@@ -7,18 +7,15 @@ pub mod round;
 pub mod network;
 pub mod messages;
 pub mod mempool;
+pub mod arena_mempool;
 pub mod ring;
 pub mod tui;
 
-pub use protocol::{TangleProtocol, Commitment};
-pub use metrics::NodeMetrics;
-pub use types::{
-    Transaction, TransactionPayload, ProcessedTransaction, RingInfo, RingPosition,
-    Batch, BatchHeader, MAX_DISTANCE, DEFAULT_BATCH_SIZE,
-};
-pub use geometric_ledger::{GeometricLedger, Account};
 pub use sequencer::{Sequencer, SequencerConfig};
 pub use round::{RoundManager, RoundConfig, RoundMetrics};
 pub use messages::{WireMessage, SerializableBatchHeader, SerializableTransaction, PROTOCOL_VERSION};
 pub use mempool::{Mempool, MempoolConfig, MempoolStats};
+pub use arena_mempool::{ArenaMempool, ArenaStats, MAX_WORKERS as ARENA_MAX_WORKERS, ZONE_SIZE};
 pub use ring::{RingRoutingTable, VirtualNodeConfig, calculate_ring_position};
+pub use types::{Transaction, TransactionPayload, Batch, ProcessedTransaction, MAX_DISTANCE, DEFAULT_BATCH_SIZE};
+pub use geometric_ledger::{GeometricLedger, Account};
