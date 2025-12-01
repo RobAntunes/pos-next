@@ -368,7 +368,7 @@ mod tests {
                 amount: 100,
                 nonce,
             },
-            [0u8; 64],
+            crate::types::SignatureType::Ed25519([0u8; 64]),
             nonce,
         )
     }

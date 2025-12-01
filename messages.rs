@@ -140,27 +140,12 @@ impl From<Transaction> for SerializableTransaction {
 impl From<SerializableTransaction> for Transaction {
     fn from(tx: SerializableTransaction) -> Self {
         // Re-create transaction (recomputes hash eagerly)
-        match tx.signature {
-            SignatureType::Ed25519(sig) => Transaction::new(
-                tx.sender,
-                tx.payload,
-                sig,
-                tx.timestamp
-            ),
-            SignatureType::HashReveal(secret) => {
-                 // Extract nonce from payload to call new_fast
-                 let nonce = match &tx.payload {
-                     TransactionPayload::Transfer { nonce, .. } => *nonce,
-                 };
-                 Transaction::new_fast(
-                    tx.sender,
-                    tx.payload,
-                    nonce,
-                    tx.timestamp,
-                    secret
-                )
-            }
-        }
+        Transaction::new(
+            tx.sender,
+            tx.payload,
+            tx.signature,
+            tx.timestamp
+        )
     }
 }
 

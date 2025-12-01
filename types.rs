@@ -55,27 +55,26 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    /// Create a new transaction with Ed25519 signature
+    /// Create a new transaction with generic signature
     pub fn new(
         sender: [u8; 32],
         payload: TransactionPayload,
-        signature: [u8; 64],
+        signature: SignatureType,
         timestamp: u64,
     ) -> Self {
         let nonce = match &payload {
             TransactionPayload::Transfer { nonce, .. } => *nonce,
         };
-        let sig_type = SignatureType::Ed25519(signature);
         
         // Compute hash eagerly
-        let hash = Self::compute_hash(&sender, &payload, nonce, timestamp, &sig_type);
+        let hash = Self::compute_hash(&sender, &payload, nonce, timestamp, &signature);
 
         Self {
             sender,
             payload,
             nonce,
             timestamp,
-            signature: sig_type,
+            signature,
             hash,
         }
     }
@@ -267,7 +266,7 @@ mod tests {
                 amount: 1000,
                 nonce: 1,
             },
-            [0u8; 64],
+            SignatureType::Ed25519([0u8; 64]),
             12345,
         );
 
@@ -285,7 +284,7 @@ mod tests {
                 amount: 100,
                 nonce: 0,
             },
-            [0u8; 64],
+            SignatureType::Ed25519([0u8; 64]),
             0,
         );
         
@@ -296,7 +295,7 @@ mod tests {
                 amount: 200,
                 nonce: 1,
             },
-            [0u8; 64],
+            SignatureType::Ed25519([0u8; 64]),
             0,
         );
 
