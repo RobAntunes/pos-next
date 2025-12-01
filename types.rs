@@ -111,10 +111,19 @@ impl Transaction {
         timestamp: u64,
         signature: &SignatureType,
     ) -> Hash {
-        let payload_bytes = Self::serialize_payload(payload);
         let mut hasher = blake3::Hasher::new();
         hasher.update(sender);
-        hasher.update(&payload_bytes);
+        
+        // Stream payload directly (zero allocation)
+        match payload {
+            TransactionPayload::Transfer { recipient, amount, nonce: p_nonce } => {
+                hasher.update(&[0u8]); // discriminant
+                hasher.update(recipient);
+                hasher.update(&amount.to_le_bytes());
+                hasher.update(&p_nonce.to_le_bytes());
+            }
+        }
+
         hasher.update(&nonce.to_le_bytes());
         hasher.update(&timestamp.to_le_bytes());
         

@@ -437,11 +437,19 @@ async fn producer_loop(
     let node_hash = blake3::hash(b"default-sequencer-node");
     let node_position = pos::calculate_ring_position(&node_hash);
 
+    // Pre-compute accounts to avoid hashing in the hot loop
+    let accounts: std::sync::Arc<Vec<[u8; 32]>> = std::sync::Arc::new((0u64..10000).map(|i| {
+        let seed = i.to_le_bytes();
+        let hash = blake3::hash(&seed);
+        *hash.as_bytes()
+    }).collect());
+
     info!("🏭 Producer #{} starting: {} TPS target (Partition {})", worker_id, target_tps, worker_id);
 
     loop {
         let burst_start = Instant::now();
         let arena_clone = arena.clone();
+        let accounts_clone = accounts.clone();
         let current_nonce = nonce;
         
         let submitted = tokio::task::spawn_blocking(move || {
@@ -452,15 +460,12 @@ async fn producer_loop(
             let mut batch = Vec::with_capacity(burst_size);
             
             for i in 0..burst_size {
-                // Deterministic generation (no mutex)
-                let sender_id = (current_nonce + i as u64) % 10000;
-                let sender_seed = sender_id.to_le_bytes();
-                let sender_hash = blake3::hash(&sender_seed);
-                let sender = *sender_hash.as_bytes();
+                // Deterministic lookup (O(1))
+                let sender_idx = ((current_nonce + i as u64) % 10000) as usize;
+                let sender = accounts_clone[sender_idx];
                 
-                let recipient_id = ((current_nonce + i as u64) / 10000) % 10000;
-                let recipient_hash = blake3::hash(&recipient_id.to_le_bytes());
-                let recipient = *recipient_hash.as_bytes();
+                let recipient_idx = (((current_nonce + i as u64) / 10000) % 10000) as usize;
+                let recipient = accounts_clone[recipient_idx];
 
                 let sender_nonce = (current_nonce + i as u64) / 10000;
                 let amount = ((i as u64 * 7919) % 9999) + 1;
@@ -543,10 +548,12 @@ fn consumer_loop_blocking(
                     if let Err(e) = batch_sender.send(batch) {
                         tracing::error!("Failed to send batch: {}", e);
                     }
-                    total_processed.fetch_add(accepted as u64, Ordering::Relaxed);
                     batches_since_report += 1;
-                    processed_since_report += accepted as u64;
                 }
+                
+                // Update metrics for ALL processed transactions (accepted or rejected)
+                total_processed.fetch_add((accepted + rejected) as u64, Ordering::Relaxed);
+                processed_since_report += (accepted + rejected) as u64;
             }
         } else {
             // No ready zones in partition, yield
@@ -556,7 +563,7 @@ fn consumer_loop_blocking(
         if worker_id == 0 && last_report.elapsed() >= Duration::from_secs(5) {
             let actual_tps = processed_since_report as f64 / last_report.elapsed().as_secs_f64();
             let stats = arena.stats();
-            tracing::info!("⚡ Consumer Stats: {} batches, {} tx/s | Arena: {} ready",
+            tracing::info!("⚡ Consumer Stats: {} batches, {} tx/s (Sequenced) | Arena: {} ready",
                           batches_since_report, actual_tps as u64, stats.zones_ready);
             batches_since_report = 0;
             processed_since_report = 0;
