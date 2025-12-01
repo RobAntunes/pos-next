@@ -13,9 +13,8 @@ pub struct Account {
     pub pubkey: [u8; 32],
     pub balance: u64,
     pub nonce: u64,
-    pub staked: u64,
     pub last_modified: u64,
-    pub _padding: [u8; 72],
+    pub _padding: [u8; 80],  // 32 + 8 + 8 + 8 + 80 = 136, but align(128) rounds to 128
 }
 
 impl Default for Account {
@@ -24,9 +23,8 @@ impl Default for Account {
             pubkey: [0u8; 32],
             balance: 0,
             nonce: 0,
-            staked: 0,
             last_modified: 0,
-            _padding: [0u8; 72],
+            _padding: [0u8; 80],
         }
     }
 }
@@ -38,18 +36,23 @@ const SHARD_COUNT: usize = 256;
 const ACCOUNTS_PER_SHARD: usize = 1_000_000;
 
 // Atomic index slot
-// Changed from align(64) to align(8) to reduce memory from ~32GB to ~4GB
-// The 64-byte alignment was causing 8x memory waste (64 bytes per 8-byte slot)
-#[repr(C, align(8))]
+// OPTIMIZATION: align(64) for cache line alignment - prevents false sharing between adjacent slots
+// Each slot gets its own cache line, eliminating CPU coherency traffic during concurrent CAS operations
+// Trade-off: Uses more memory (~32GB for 256M slots) but massively reduces contention at high TPS
+#[repr(C, align(64))]
 struct AtomicSlot {
     data: AtomicU64,
+    _padding: [u8; 56], // Pad to 64 bytes (8 + 56 = 64)
 }
 
 impl AtomicSlot {
     const EMPTY: u64 = 0;
 
     fn new() -> Self {
-        Self { data: AtomicU64::new(Self::EMPTY) }
+        Self {
+            data: AtomicU64::new(Self::EMPTY),
+            _padding: [0u8; 56],
+        }
     }
 
     fn pack(hash: u32, offset: u32, distance: u8) -> u64 {

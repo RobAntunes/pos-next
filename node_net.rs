@@ -210,7 +210,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_processed_clone = total_processed.clone();
 
     // Channel for signed batches (sequencer → ledger worker)
-    let (batch_tx, batch_rx) = std::sync::mpsc::sync_channel::<pos::Batch>(100);
+    // OPTIMIZATION: Increased from 100 to 10000 to prevent sequencer blocking
+    // The sequencer (fast) shouldn't wait for ledger (slow) - decouple throughput
+    let (batch_tx, batch_rx) = std::sync::mpsc::sync_channel::<pos::Batch>(10000);
 
     std::thread::spawn(move || {
         consumer_loop_blocking(
@@ -824,7 +826,8 @@ fn ledger_worker_loop(
     let mut shard_receivers = Vec::new();
 
     for _ in 0..256 {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<pos::Batch>>(100);
+        // OPTIMIZATION: Increased from 100 to 1000 per shard (256 shards × 1000 = 256K total buffer)
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<pos::Batch>>(1000);
         shard_senders.push(tx);
         shard_receivers.push(rx);
     }
@@ -847,15 +850,34 @@ fn ledger_worker_loop(
     loop {
         match batch_receiver.recv() {
             Ok(batch) => {
-                // Group transactions by sender's shard
-                let mut shard_batches: Vec<Vec<pos::ProcessedTransaction>> =
-                    (0..256).map(|_| Vec::new()).collect();
+                // OPTIMIZATION: Parallel routing - use rayon to partition 45K txs across 256 shards
+                // This eliminates the single-threaded bottleneck of iterating 45K transactions
+                use rayon::prelude::*;
 
-                for ptx in batch.transactions {
-                    let sender = ptx.tx.sender;
-                    let shard_id = sender[0] as usize;
-                    shard_batches[shard_id].push(ptx);
-                }
+                let shard_batches: Vec<Vec<pos::ProcessedTransaction>> = batch.transactions
+                    .into_par_iter()
+                    .fold(
+                        || {
+                            // Thread-local accumulator: 256 empty vectors
+                            (0..256).map(|_| Vec::new()).collect::<Vec<Vec<_>>>()
+                        },
+                        |mut acc, ptx| {
+                            // Route transaction to shard based on sender's first byte
+                            let shard_id = ptx.tx.sender[0] as usize;
+                            acc[shard_id].push(ptx);
+                            acc
+                        }
+                    )
+                    .reduce(
+                        || (0..256).map(|_| Vec::new()).collect::<Vec<Vec<_>>>(),
+                        |mut a, b| {
+                            // Merge thread-local results
+                            for (shard_id, mut txs) in b.into_iter().enumerate() {
+                                a[shard_id].append(&mut txs);
+                            }
+                            a
+                        }
+                    );
 
                 // Send to appropriate shard workers
                 for (shard_id, txs) in shard_batches.into_iter().enumerate() {

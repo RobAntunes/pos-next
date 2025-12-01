@@ -4,7 +4,6 @@ use curve25519_dalek::{
     scalar::Scalar,
 };
 use rand::RngCore;
-use std::convert::TryInto;
 use std::time::Instant;
 use uuid::Uuid;
 

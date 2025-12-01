@@ -81,16 +81,16 @@ fn main() {
 
     // Transaction submission message
     println!("5️⃣  Testing transaction submission message...");
-    let tx = Transaction {
-        sender: [1u8; 32],
-        payload: TransactionPayload::Transfer {
+    let tx = Transaction::new(
+        [1u8; 32],
+        TransactionPayload::Transfer {
             recipient: [2u8; 32],
             amount: 5000,
             nonce: 123,
         },
-        signature: [0u8; 64],
-        timestamp: 1234567890,
-    };
+        [0u8; 64],
+        1234567890,
+    );
     
     let tx_msg = WireMessage::TransactionSubmission {
         tx: tx.into(),

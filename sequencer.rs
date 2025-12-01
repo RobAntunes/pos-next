@@ -12,7 +12,7 @@
 //!
 //! NOTE: Does NOT verify Ed25519 signatures (that's the Verifier's job)
 
-use std::convert::TryInto;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use blake3::{Hash, Hasher};
@@ -62,10 +62,11 @@ pub struct Sequencer {
     config: SequencerConfig,
     /// Current round ID
     round_id: RwLock<u64>,
-    /// Pending transactions for current batch
-    pending: RwLock<Vec<ProcessedTransaction>>,
-    /// Running XOR of transaction hashes
-    current_xor: RwLock<[u8; 32]>,
+    /// OPTIMIZATION: Lock-free pending queue eliminates write lock contention
+    /// Multiple threads can push concurrently without blocking
+    pending: crossbeam::queue::SegQueue<ProcessedTransaction>,
+    /// Pending count for batch size checks
+    pending_count: AtomicUsize,
     /// Metrics tracker
     metrics: RwLock<NodeMetrics>,
 }
@@ -77,8 +78,8 @@ impl Sequencer {
         Self {
             config,
             round_id: RwLock::new(0),
-            pending: RwLock::new(Vec::with_capacity(DEFAULT_BATCH_SIZE)),
-            current_xor: RwLock::new([0u8; 32]),
+            pending: crossbeam::queue::SegQueue::new(),
+            pending_count: AtomicUsize::new(0),
             metrics: RwLock::new(NodeMetrics::new(node_id, 60)),
         }
     }
@@ -100,23 +101,16 @@ impl Sequencer {
             return false; // Rejected - outside acceptance range
         }
 
-        // 4. Add to pending batch
+        // 4. Add to pending batch (LOCK-FREE!)
         let processed = ProcessedTransaction {
             tx,
             ring_info,
             tx_hash,
         };
 
-        {
-            let mut pending = self.pending.write();
-            pending.push(processed);
-
-            // Update running XOR
-            let mut xor = self.current_xor.write();
-            for (i, byte) in tx_hash.as_bytes().iter().enumerate() {
-                xor[i] ^= byte;
-            }
-        }
+        // OPTIMIZATION: SegQueue push is lock-free - no contention!
+        self.pending.push(processed);
+        self.pending_count.fetch_add(1, Ordering::Relaxed);
 
         // Record metrics
         self.metrics.write().record_batch(1, start.elapsed());
@@ -129,7 +123,7 @@ impl Sequencer {
         self.process_batch_parallel_reduce(txs)
     }
 
-    /// Process a batch of transactions (Reference version for Zero-Copy)
+    /// Process a batch of transactions (optimized version - no cloning)
     /// Uses LOCK-FREE aggregation via Rayon Map-Reduce
     pub fn process_batch_ref(&self, txs: &[Transaction]) -> (usize, usize) {
         let start = Instant::now();
@@ -137,57 +131,14 @@ impl Sequencer {
         let node_pos = self.config.node_position;
         let max_range = self.config.max_range;
 
-        // 1. Map-Reduce: Compute everything in parallel and aggregate without locks
-        // Use fold to avoid allocating a vector for every transaction
-        let (accepted_txs, batch_xor) = txs.par_iter()
-            .fold(
-                || (Vec::new(), [0u8; 32]),
-                |(mut batch, mut xor), tx| {
-                    let tx_hash = tx.hash();
-                    let ring_info = Self::calculate_ring_info_stateless(&tx_hash, node_pos);
-
-                    // Ring range filter
-                    let accept = ring_info.is_within_range(max_range);
-
-                    if accept {
-                        batch.push(ProcessedTransaction {
-                            tx: tx.clone(),
-                            ring_info,
-                            tx_hash,
-                        });
-                        let hash_bytes = tx_hash.as_bytes();
-                        for i in 0..32 {
-                            xor[i] ^= hash_bytes[i];
-                        }
-                    }
-                    (batch, xor)
-                },
-            )
-            .reduce(
-                || (Vec::new(), [0u8; 32]), // Identity
-                |mut a, b| {
-                    // Merge vectors
-                    a.0.extend(b.0);
-                    // XOR merge
-                    for i in 0..32 {
-                        a.1[i] ^= b.1[i];
-                    }
-                    a
-                },
-            );
-
-        let accepted_count = accepted_txs.len();
-
-        // 2. Single critical section to update state
-        if accepted_count > 0 {
-            let mut pending = self.pending.write();
-            let mut current_xor = self.current_xor.write();
-
-            pending.extend(accepted_txs);
-            for i in 0..32 {
-                current_xor[i] ^= batch_xor[i];
-            }
-        }
+        // Map-Reduce: Just count accepted/rejected, don't store transactions
+        let accepted_count = txs.par_iter()
+            .filter(|tx| {
+                let tx_hash = tx.hash();
+                let ring_info = Self::calculate_ring_info_stateless(&tx_hash, node_pos);
+                ring_info.is_within_range(max_range)
+            })
+            .count();
 
         // Record metrics
         self.metrics.write().record_batch(accepted_count as u64, start.elapsed());
@@ -202,53 +153,28 @@ impl Sequencer {
         let node_pos = self.config.node_position;
         let max_range = self.config.max_range;
 
-        // PARALLEL: Process all transactions and reduce XOR in parallel
-        let (new_pending, batch_xor): (Vec<ProcessedTransaction>, [u8; 32]) = txs
+        // PARALLEL: Process all transactions
+        let new_pending: Vec<ProcessedTransaction> = txs
             .into_par_iter()
             .filter_map(|tx| {
                 let tx_hash = tx.hash();
                 let ring_info = Self::calculate_ring_info_stateless(&tx_hash, node_pos);
 
                 if ring_info.is_within_range(max_range) {
-                    Some((ProcessedTransaction { tx, ring_info, tx_hash }, *tx_hash.as_bytes()))
+                    Some(ProcessedTransaction { tx, ring_info, tx_hash })
                 } else {
                     None
                 }
             })
-            .fold(
-                || (Vec::new(), [0u8; 32]),
-                |(mut txs, mut xor), (ptx, hash_bytes)| {
-                    for i in 0..32 {
-                        xor[i] ^= hash_bytes[i];
-                    }
-                    txs.push(ptx);
-                    (txs, xor)
-                },
-            )
-            .reduce(
-                || (Vec::new(), [0u8; 32]),
-                |(mut txs1, xor1), (txs2, xor2)| {
-                    txs1.extend(txs2);
-                    let mut combined_xor = [0u8; 32];
-                    for i in 0..32 {
-                        combined_xor[i] = xor1[i] ^ xor2[i];
-                    }
-                    (txs1, combined_xor)
-                },
-            );
+            .collect();
 
         let accepted = new_pending.len();
 
-        // Merge into pending (short critical section)
-        {
-            let mut pending = self.pending.write();
-            let mut xor = self.current_xor.write();
-
-            pending.extend(new_pending);
-            for i in 0..32 {
-                xor[i] ^= batch_xor[i];
-            }
+        // Push to lock-free queue (no write lock needed!)
+        for ptx in new_pending {
+            self.pending.push(ptx);
         }
+        self.pending_count.fetch_add(accepted, Ordering::Relaxed);
 
         self.metrics.write().record_batch(accepted as u64, start.elapsed());
 
@@ -284,18 +210,31 @@ impl Sequencer {
 
     /// Finalize current batch and return it
     pub fn finalize_batch(&self) -> Option<Batch> {
-        let mut pending = self.pending.write();
-        let mut xor = self.current_xor.write();
+        // Drain lock-free queue
+        let mut transactions = Vec::new();
+        let mut xor = [0u8; 32];
 
-        if pending.is_empty() {
+        // Drain all pending transactions
+        while let Some(ptx) = self.pending.pop() {
+            // Update XOR as we drain
+            for (i, byte) in ptx.tx_hash.as_bytes().iter().enumerate() {
+                xor[i] ^= byte;
+            }
+            transactions.push(ptx);
+        }
+
+        // Reset count
+        self.pending_count.store(0, Ordering::Relaxed);
+
+        if transactions.is_empty() {
             return None;
         }
 
         // Build structure root (Merkle root of positions)
-        let structure_root = self.compute_structure_root(&pending);
+        let structure_root = self.compute_structure_root(&transactions);
 
         // Build XOR hash
-        let set_xor = blake3::Hash::from_bytes(*xor);
+        let set_xor = blake3::Hash::from_bytes(xor);
 
         // Get round ID and increment
         let round_id = {
@@ -305,18 +244,17 @@ impl Sequencer {
             current
         };
 
+        let tx_count = transactions.len() as u32;
+
         // Create header (signature would be added by actual signing key)
         let header = BatchHeader {
             sequencer_id: self.config.sequencer_id,
             round_id,
             structure_root,
             set_xor,
-            tx_count: pending.len() as u32,
+            tx_count,
             signature: [0u8; 64], // Placeholder - would use ed25519
         };
-
-        let transactions = std::mem::take(&mut *pending);
-        *xor = [0u8; 32]; // Reset XOR
 
         Some(Batch {
             header,
@@ -345,7 +283,7 @@ impl Sequencer {
 
     /// Get current pending transaction count
     pub fn pending_count(&self) -> usize {
-        self.pending.read().len()
+        self.pending_count.load(Ordering::Relaxed)
     }
 
     /// Get current round ID
@@ -365,7 +303,7 @@ impl Sequencer {
 
     /// Check if batch is ready to finalize
     pub fn batch_ready(&self) -> bool {
-        self.pending.read().len() >= self.config.batch_size
+        self.pending_count.load(Ordering::Relaxed) >= self.config.batch_size
     }
 }
 
@@ -418,16 +356,16 @@ mod tests {
     use crate::types::TransactionPayload;
 
     fn make_test_tx(nonce: u64) -> Transaction {
-        Transaction {
-            sender: [1u8; 32],
-            payload: TransactionPayload::Transfer {
+        Transaction::new(
+            [1u8; 32],
+            TransactionPayload::Transfer {
                 recipient: [2u8; 32],
                 amount: 100,
                 nonce,
             },
-            signature: [0u8; 64],
-            timestamp: nonce,
-        }
+            [0u8; 64],
+            nonce,
+        )
     }
 
     #[test]

@@ -1,16 +1,16 @@
-//! Simple persistence test to verify RocksDB integration
+//! Simple persistence test to verify GeometricLedger integration
 //!
 //! This test:
-//! 1. Creates a ledger and processes some transactions
+//! 1. Creates a ledger and processes some transfers
 //! 2. Closes the ledger
 //! 3. Reopens the ledger to verify state was persisted
 
-use pos::{Ledger, Transaction, TransactionPayload};
+use pos::{GeometricLedger, Account};
 use std::sync::Arc;
 
 fn main() {
     println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║         POS Persistence Test (RocksDB Integration)          ║");
+    println!("║       POS Persistence Test (GeometricLedger mmap)            ║");
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
 
@@ -19,9 +19,9 @@ fn main() {
     // Clean up any existing test database
     let _ = std::fs::remove_dir_all(db_path);
 
-    println!("1️⃣  Creating new ledger and processing transactions...");
+    println!("1️⃣  Creating new ledger and processing transfers...");
     {
-        let ledger = Arc::new(Ledger::new(db_path));
+        let ledger = Arc::new(GeometricLedger::new(db_path).expect("Failed to create ledger"));
 
         // Create test accounts
         let alice = [1u8; 32];
@@ -29,68 +29,55 @@ fn main() {
         let charlie = [3u8; 32];
 
         // Give Alice initial balance
-        ledger.set_balance(alice, 10_000);
+        ledger.mint(alice, 10_000);
 
-        // Create transactions
-        let transactions = vec![
-            Transaction::new(
-                alice,
-                TransactionPayload::Transfer {
-                    recipient: bob,
-                    amount: 3_000,
-                    nonce: 0,
-                },
-                [0u8; 64],
-                1234567890,
-            ),
-            Transaction::new(
-                alice,
-                TransactionPayload::Transfer {
-                    recipient: charlie,
-                    amount: 2_000,
-                    nonce: 1,
-                },
-                [0u8; 64],
-                1234567891,
-            ),
-        ];
+        // Apply transfers using batch update
+        let mut alice_acc = ledger.get(&alice).unwrap();
+        alice_acc.balance -= 5_000;
+        
+        let bob_acc = Account { pubkey: bob, balance: 3_000, ..Default::default() };
+        let charlie_acc = Account { pubkey: charlie, balance: 2_000, ..Default::default() };
 
-        // Apply batch (this will persist to RocksDB)
-        ledger.apply_batch(&transactions);
+        ledger.update_batch(&[
+            (alice, alice_acc),
+            (bob, bob_acc),
+            (charlie, charlie_acc),
+        ]).expect("Batch update failed");
+
+        // Force flush to disk
+        ledger.snapshot().expect("Snapshot failed");
 
         // Verify in-memory state
-        let alice_balance = ledger.get_account(&alice).balance;
-        let bob_balance = ledger.get_account(&bob).balance;
-        let charlie_balance = ledger.get_account(&charlie).balance;
+        let alice_balance = ledger.get(&alice).map(|a| a.balance).unwrap_or(0);
+        let bob_balance = ledger.get(&bob).map(|a| a.balance).unwrap_or(0);
+        let charlie_balance = ledger.get(&charlie).map(|a| a.balance).unwrap_or(0);
 
         println!("   Alice balance: {}", alice_balance);
         println!("   Bob balance: {}", bob_balance);
         println!("   Charlie balance: {}", charlie_balance);
-        println!("   Account count: {}", ledger.account_count());
         println!();
 
         assert_eq!(alice_balance, 5_000, "Alice should have 5,000 after transfers");
         assert_eq!(bob_balance, 3_000, "Bob should have 3,000");
         assert_eq!(charlie_balance, 2_000, "Charlie should have 2,000");
-    } // Ledger is dropped here, forcing a close
+    } // Ledger is dropped here
 
     println!("2️⃣  Ledger closed. Reopening to verify persistence...");
     {
-        let ledger = Arc::new(Ledger::new(db_path));
+        let ledger = Arc::new(GeometricLedger::new(db_path).expect("Failed to reopen ledger"));
 
         let alice = [1u8; 32];
         let bob = [2u8; 32];
         let charlie = [3u8; 32];
 
         // Verify persisted state
-        let alice_balance = ledger.get_account(&alice).balance;
-        let bob_balance = ledger.get_account(&bob).balance;
-        let charlie_balance = ledger.get_account(&charlie).balance;
+        let alice_balance = ledger.get(&alice).map(|a| a.balance).unwrap_or(0);
+        let bob_balance = ledger.get(&bob).map(|a| a.balance).unwrap_or(0);
+        let charlie_balance = ledger.get(&charlie).map(|a| a.balance).unwrap_or(0);
 
         println!("   Alice balance (restored): {}", alice_balance);
         println!("   Bob balance (restored): {}", bob_balance);
         println!("   Charlie balance (restored): {}", charlie_balance);
-        println!("   Account count: {}", ledger.account_count());
         println!();
 
         assert_eq!(alice_balance, 5_000, "Alice balance should be restored");
@@ -101,8 +88,8 @@ fn main() {
     println!("✅ SUCCESS! State was correctly persisted and restored.");
     println!();
     println!("📝 Summary:");
-    println!("   • Write-through cache: Instant RAM updates + disk persistence");
-    println!("   • RocksDB integration: Successful crash recovery");
+    println!("   • Memory-mapped files: Instant updates + OS-managed persistence");
+    println!("   • GeometricLedger: 256 shards, 256M account capacity");
     println!("   • All balances restored correctly after restart");
 
     // Clean up test database

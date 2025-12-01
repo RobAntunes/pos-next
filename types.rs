@@ -6,19 +6,13 @@
 use blake3::Hash;
 use serde::{Deserialize, Serialize};
 
-/// Minimum stake required to become a sequencer (1,000,000 tokens)
-pub const MIN_STAKE: u64 = 1_000_000;
-
-/// Lock-up period for staking in seconds (7 days)
-pub const STAKE_LOCK_PERIOD: u64 = 7 * 24 * 60 * 60;
-
 /// Maximum geometric distance for transaction acceptance
 pub const MAX_DISTANCE: u64 = u64::MAX / 4;
 
 /// Default batch size for the sequencer
 pub const DEFAULT_BATCH_SIZE: usize = 10_000;
 
-/// Transaction payload types supporting economy and fraud proofs
+/// Transaction payload types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TransactionPayload {
     /// Standard token transfer
@@ -29,27 +23,6 @@ pub enum TransactionPayload {
         amount: u64,
         /// Transaction nonce for replay protection
         nonce: u64,
-    },
-    /// Stake tokens for validator eligibility
-    Stake {
-        /// Amount to lock for staking
-        amount: u64,
-    },
-    /// Unstake request (begins lock-up countdown)
-    Unstake {
-        /// Amount to unstake
-        amount: u64,
-    },
-    /// Fraud proof submission
-    FraudProof {
-        /// Public key of the offending sequencer
-        offender_id: [u8; 32],
-        /// ID of the batch containing invalid transaction
-        batch_id: [u8; 32],
-        /// Index of the invalid transaction in the batch
-        invalid_tx_index: u32,
-        /// Merkle path + signature data proving invalidity
-        proof_data: Vec<u8>,
     },
 }
 
@@ -117,24 +90,6 @@ impl Transaction {
                 bytes.extend_from_slice(recipient);
                 bytes.extend_from_slice(&amount.to_le_bytes());
                 bytes.extend_from_slice(&nonce.to_le_bytes());
-                bytes
-            }
-            TransactionPayload::Stake { amount } => {
-                let mut bytes = vec![1u8];
-                bytes.extend_from_slice(&amount.to_le_bytes());
-                bytes
-            }
-            TransactionPayload::Unstake { amount } => {
-                let mut bytes = vec![2u8];
-                bytes.extend_from_slice(&amount.to_le_bytes());
-                bytes
-            }
-            TransactionPayload::FraudProof { offender_id, batch_id, invalid_tx_index, proof_data } => {
-                let mut bytes = vec![3u8];
-                bytes.extend_from_slice(offender_id);
-                bytes.extend_from_slice(batch_id);
-                bytes.extend_from_slice(&invalid_tx_index.to_le_bytes());
-                bytes.extend_from_slice(proof_data);
                 bytes
             }
         }
@@ -241,59 +196,22 @@ impl Batch {
     }
 }
 
-/// Slashing condition types
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SlashingReason {
-    /// Transaction outside geometric acceptance zone
-    InvalidStructure,
-    /// Transaction signature doesn't match derived public key
-    InvalidSignature,
-    /// Transaction spends non-existent funds (post-settlement)
-    InvalidState,
-}
-
-/// Result of fraud proof verification
-#[derive(Debug, Clone)]
-pub struct FraudProofResult {
-    /// Whether the fraud proof is valid
-    pub is_valid: bool,
-    /// The slashing reason if valid
-    pub reason: Option<SlashingReason>,
-    /// Amount to slash from offender
-    pub slash_amount: u64,
-    /// Batch that should be rolled back
-    pub batch_id: Option<Hash>,
-}
-
-/// Verification status for async validation
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VerificationStatus {
-    /// Not yet verified
-    Pending,
-    /// Optimistically accepted (signature not checked)
-    OptimisticAccept,
-    /// Fully verified (signature validated)
-    Verified,
-    /// Invalid (fraud proof submitted)
-    Invalid,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_transaction_hash() {
-        let tx = Transaction {
-            sender: [1u8; 32],
-            payload: TransactionPayload::Transfer {
+        let tx = Transaction::new(
+            [1u8; 32],
+            TransactionPayload::Transfer {
                 recipient: [2u8; 32],
                 amount: 1000,
                 nonce: 1,
             },
-            signature: [0u8; 64],
-            timestamp: 12345,
-        };
+            [0u8; 64],
+            12345,
+        );
 
         let hash1 = tx.hash();
         let hash2 = tx.hash();
@@ -302,27 +220,27 @@ mod tests {
 
     #[test]
     fn test_payload_serialization() {
-        let transfer = TransactionPayload::Transfer {
-            recipient: [1u8; 32],
-            amount: 100,
-            nonce: 0,
-        };
+        let tx1 = Transaction::new(
+            [0u8; 32],
+            TransactionPayload::Transfer {
+                recipient: [1u8; 32],
+                amount: 100,
+                nonce: 0,
+            },
+            [0u8; 64],
+            0,
+        );
         
-        let stake = TransactionPayload::Stake { amount: MIN_STAKE };
-        
-        let tx1 = Transaction {
-            sender: [0u8; 32],
-            payload: transfer,
-            signature: [0u8; 64],
-            timestamp: 0,
-        };
-        
-        let tx2 = Transaction {
-            sender: [0u8; 32],
-            payload: stake,
-            signature: [0u8; 64],
-            timestamp: 0,
-        };
+        let tx2 = Transaction::new(
+            [0u8; 32],
+            TransactionPayload::Transfer {
+                recipient: [2u8; 32],
+                amount: 200,
+                nonce: 1,
+            },
+            [0u8; 64],
+            0,
+        );
 
         // Different payloads should produce different bytes
         assert_ne!(tx1.payload_bytes(), tx2.payload_bytes());
