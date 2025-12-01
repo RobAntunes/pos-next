@@ -17,5 +17,5 @@ pub use messages::{WireMessage, SerializableBatchHeader, SerializableTransaction
 pub use mempool::{Mempool, MempoolConfig, MempoolStats};
 pub use arena_mempool::{ArenaMempool, ArenaStats, MAX_WORKERS as ARENA_MAX_WORKERS, ZONE_SIZE};
 pub use ring::{RingRoutingTable, VirtualNodeConfig, calculate_ring_position};
-pub use types::{Transaction, TransactionPayload, Batch, ProcessedTransaction, MAX_DISTANCE, DEFAULT_BATCH_SIZE};
+pub use types::{Transaction, TransactionPayload, Batch, ProcessedTransaction, MAX_DISTANCE, DEFAULT_BATCH_SIZE, SignatureType};
 pub use geometric_ledger::{GeometricLedger, Account};
