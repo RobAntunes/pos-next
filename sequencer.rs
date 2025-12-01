@@ -231,6 +231,10 @@ impl Sequencer {
             return None;
         }
 
+        // OPTIMIZATION (Enhancement #2): Sort by shard ID (sender[0])
+        // This allows Zero-Copy Routing in the ledger worker
+        transactions.par_sort_unstable_by_key(|ptx| ptx.tx.sender[0]);
+
         // Build structure root (Merkle root of positions)
         let structure_root = self.compute_structure_root(&transactions);
 
