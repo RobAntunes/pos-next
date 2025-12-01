@@ -85,6 +85,8 @@ struct DiscoveryBehaviour {
     mdns: mdns::tokio::Behaviour,
 }
 
+type ShardSender = std::sync::mpsc::SyncSender<ShardWork>;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing
@@ -112,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Starting {} on QUIC port {}", node_name, args.port);
     println!();
 
-    // Initialize Geometric Ledger (custom high-performance database)
+    // Initialize Geometric Ledger
     let db_path = format!("./data/geometric_ledger_{}", args.port);
     let ledger = Arc::new(GeometricLedger::new(&db_path).expect("Failed to initialize GeometricLedger"));
     
@@ -124,7 +126,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     
     // Initialize Arena Mempool
-    // Partitioned per worker pair (Producer N <-> Consumer N)
     let arena = Arc::new(ArenaMempool::new());
     let arena_capacity = pos::ARENA_MAX_WORKERS * 16 * pos::ZONE_SIZE;
     info!("📦 Arena mempool initialized ({} zones, {}M capacity, partitioned)", 
@@ -133,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Channel for discovered peers
     let (peer_tx, mut peer_rx) = mpsc::channel::<DiscoveredPeer>(100);
 
-    // Start QUIC transport (L2)
+    // Start QUIC transport
     let quic_endpoint = start_quic_server(args.port).await?;
     let quic_endpoint_clone = quic_endpoint.clone();
     
@@ -142,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arena_clone = arena.clone();
     let node_id = generate_node_id(&node_name);
 
-    // Spawn QUIC listener task
+    // Spawn QUIC listener
     tokio::spawn(async move {
         handle_quic_connections(
             quic_endpoint_clone,
@@ -155,7 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("✅ L2 (QUIC) listening on 0.0.0.0:{}", args.port);
 
-    // Start mDNS discovery (L0)
+    // Start mDNS discovery
     let quic_port = args.port;
     tokio::spawn(async move {
         if let Err(e) = start_mdns_discovery(args.discovery_port, quic_port, peer_tx).await {
@@ -165,47 +166,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("✅ L0 (mDNS) discovery service started");
     
-    // Determine Threading Model
+    // Threading Model
     let total_cores = num_cpus::get();
-    // Split cores: Half for producers, half for consumers
-    // For 8 cores: 4 Prod, 4 Cons.
     let num_pairs = (total_cores / 2).max(1).min(pos::ARENA_MAX_WORKERS);
-    
     info!("⚙️ Threading Model: {} Producer/Consumer pairs (using {} cores)", num_pairs, num_pairs * 2);
     
     let batch_size = args.batch_size;
     let total_processed = Arc::new(AtomicU64::new(0));
     let total_processed_clone = total_processed.clone();
-    
-    // Channel for signed batches (sequencer → ledger worker)
-    // Unbounded to prevent sequencer blocking
-    let (batch_tx, batch_rx) = std::sync::mpsc::channel::<pos::Batch>();
+    let total_applied = Arc::new(AtomicU64::new(0));
+
+    // Initialize Shard Workers (Receivers)
+    // Returns vector of Senders to be shared among Consumers
+    let shard_senders = start_shard_workers(ledger.clone(), total_applied.clone());
+    let shard_senders = Arc::new(shard_senders);
 
     // Spawn Consumers (Consumers pull from their partition)
     for i in 0..num_pairs {
         let arena_consumer = arena.clone();
         let total_clone = total_processed_clone.clone();
-        let batch_tx_clone = batch_tx.clone();
-        // dedicated sequencer instance per consumer (no contention)
-        let sequencer = Sequencer::new(sequencer_config.clone());
+        let shard_senders_clone = shard_senders.clone();
+        let mut sequencer = Sequencer::new(sequencer_config.clone());
         
         std::thread::spawn(move || {
             consumer_loop_blocking(
                 i, // worker_id
-                sequencer,
+                &mut sequencer,
                 arena_consumer,
                 total_clone,
                 batch_size,
-                batch_tx_clone,
+                shard_senders_clone,
             );
         });
     }
     
     info!("✅ {} Consumer threads started", num_pairs);
     
-    // Spawn Producers (Producers write to their partition)
+    // Spawn Producers
     if args.producer {
-        // Pre-mint balance
         for i in 0..10000u64 {
             let sender_seed = i.to_le_bytes();
             let sender_hash = blake3::hash(&sender_seed);
@@ -234,15 +232,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         info!("✅ {} Producer loops started (target: {} TPS total)", num_pairs, args.tps);
     }
-
-    // Async Ledger Worker: Applies batches to state (eventual consistency)
-    let ledger_worker = ledger.clone();
-    let total_applied = Arc::new(AtomicU64::new(0));
-    let total_applied_clone = total_applied.clone();
-
-    std::thread::spawn(move || {
-        ledger_worker_loop(ledger_worker, batch_rx, total_applied_clone);
-    });
     
     println!();
     println!("📡 Scanning for peers on the local network...");
@@ -275,6 +264,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+}
+
+fn start_shard_workers(
+    ledger: Arc<GeometricLedger>,
+    total_applied: Arc<AtomicU64>,
+) -> Vec<ShardSender> {
+    let mut senders = Vec::new();
+    let mut receivers = Vec::new();
+
+    for _ in 0..256 {
+        // Buffer size 1000 batches per shard is plenty
+        let (tx, rx) = std::sync::mpsc::sync_channel::<ShardWork>(1000);
+        senders.push(tx);
+        receivers.push(rx);
+    }
+
+    info!("💾 Starting 256 shard workers (Direct Dispatch)");
+
+    for shard_id in 0..256 {
+        let rx = receivers.remove(0);
+        let ledger_clone = ledger.clone();
+        let total_clone = total_applied.clone();
+        
+        std::thread::spawn(move || {
+            shard_worker_loop(shard_id, ledger_clone, rx, total_clone);
+        });
+    }
+
+    senders
 }
 
 // ... (mDNS and QUIC setup code remains similar, see below for changes) ...
@@ -524,11 +542,11 @@ async fn producer_loop(
 
 fn consumer_loop_blocking(
     worker_id: usize,
-    sequencer: Sequencer,
+    sequencer: &mut Sequencer,
     arena: Arc<ArenaMempool>,
     total_processed: Arc<AtomicU64>,
-    _batch_size: usize, // unused, we take full zones
-    batch_sender: std::sync::mpsc::Sender<pos::Batch>,
+    _batch_size: usize, 
+    shard_senders: Arc<Vec<std::sync::mpsc::SyncSender<ShardWork>>>,
 ) {
     use std::time::Instant;
     let mut last_report = Instant::now();
@@ -545,9 +563,7 @@ fn consumer_loop_blocking(
                 let (accepted, rejected) = sequencer.process_batch(txs);
 
                 if let Some(batch) = sequencer.finalize_batch() {
-                    if let Err(e) = batch_sender.send(batch) {
-                        tracing::error!("Failed to send batch: {}", e);
-                    }
+                    // batch_sender usage removed (Decoupled architecture)
                     batches_since_report += 1;
                 }
                 
@@ -572,73 +588,45 @@ fn consumer_loop_blocking(
     }
 }
 
-// Ledger Worker Loop (Same as before)
-fn ledger_worker_loop(
-    ledger: Arc<GeometricLedger>,
-    batch_receiver: std::sync::mpsc::Receiver<pos::Batch>,
-    total_applied: Arc<AtomicU64>,
-) {
-    use std::time::Instant;
-    tracing::info!("💾 Starting 256 shard workers");
-    let mut shard_senders = Vec::new();
-    let mut shard_receivers = Vec::new();
-    for _ in 0..256 {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<pos::Batch>>(1000);
-        shard_senders.push(tx);
-        shard_receivers.push(rx);
-    }
-    for shard_id in 0..256 {
-        let rx = shard_receivers.remove(0);
-        let ledger_clone = ledger.clone();
-        let total_applied_clone = total_applied.clone();
-        std::thread::spawn(move || {
-            shard_worker_loop(shard_id, ledger_clone, rx, total_applied_clone);
-        });
-    }
-    loop {
-        if let Ok(batch) = batch_receiver.recv() {
-             use rayon::prelude::*;
-             let shard_batches: Vec<Vec<pos::ProcessedTransaction>> = batch.transactions
-                .into_par_iter()
-                .fold(|| (0..256).map(|_| Vec::new()).collect::<Vec<Vec<_>>>(), |mut acc, ptx| {
-                    let shard_id = ptx.tx.sender[0] as usize;
-                    acc[shard_id].push(ptx);
-                    acc
-                })
-                .reduce(|| (0..256).map(|_| Vec::new()).collect::<Vec<Vec<_>>>(), |mut a, b| {
-                    for (i, mut txs) in b.into_iter().enumerate() { a[i].append(&mut txs); }
-                    a
-                });
-            for (shard_id, txs) in shard_batches.into_iter().enumerate() {
-                if !txs.is_empty() {
-                    let _ = shard_senders[shard_id].send(vec![pos::Batch { header: batch.header.clone(), transactions: txs }]);
-                }
-            }
-        }
-    }
+// Ledger Worker Loop removed (Decoupled architecture)
+
+struct ShardWork {
+    batch: Arc<pos::Batch>,
+    start: usize,
+    count: usize,
 }
 
-fn shard_worker_loop(shard_id: usize, ledger: Arc<GeometricLedger>, batch_rx: std::sync::mpsc::Receiver<Vec<pos::Batch>>, total: Arc<AtomicU64>) {
+fn shard_worker_loop(
+    shard_id: usize, 
+    ledger: Arc<GeometricLedger>, 
+    work_rx: std::sync::mpsc::Receiver<ShardWork>, 
+    total: Arc<AtomicU64>
+) {
     use std::collections::HashMap;
     use pos::Account;
-    while let Ok(batches) = batch_rx.recv() {
+    
+    // Process work items as they arrive
+    while let Ok(work) = work_rx.recv() {
         let mut cache = HashMap::new();
         let mut count = 0;
-        for batch in batches {
-            for ptx in batch.transactions {
-                if let pos::TransactionPayload::Transfer { recipient, amount, .. } = ptx.tx.payload {
-                    let sender = ptx.tx.sender;
-                    let mut s_acc = cache.remove(&sender).unwrap_or_else(|| ledger.get(&sender).unwrap_or(Account{pubkey:sender, ..Default::default()}));
-                    if s_acc.balance >= amount {
-                        s_acc.balance -= amount;
-                        cache.insert(sender, s_acc);
-                        let mut r_acc = cache.remove(&recipient).unwrap_or_else(|| ledger.get(&recipient).unwrap_or(Account{pubkey:recipient, ..Default::default()}));
-                        r_acc.balance += amount;
-                        cache.insert(recipient, r_acc);
-                        count += 1;
-                    } else {
-                        cache.insert(sender, s_acc); // Return to cache
-                    }
+        
+        // Zero-Copy: Access the slice of the shared batch
+        let txs = &work.batch.transactions[work.start..work.start + work.count];
+        
+        for ptx in txs {
+            if let pos::TransactionPayload::Transfer { recipient, amount, .. } = ptx.tx.payload {
+                let sender = ptx.tx.sender;
+                // Simple ledger application logic
+                let mut s_acc = cache.remove(&sender).unwrap_or_else(|| ledger.get(&sender).unwrap_or(Account{pubkey:sender, ..Default::default()}));
+                if s_acc.balance >= amount {
+                    s_acc.balance -= amount;
+                    cache.insert(sender, s_acc);
+                    let mut r_acc = cache.remove(&recipient).unwrap_or_else(|| ledger.get(&recipient).unwrap_or(Account{pubkey:recipient, ..Default::default()}));
+                    r_acc.balance += amount;
+                    cache.insert(recipient, r_acc);
+                    count += 1;
+                } else {
+                    cache.insert(sender, s_acc); // Return to cache
                 }
             }
         }
