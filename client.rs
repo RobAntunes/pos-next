@@ -9,7 +9,7 @@
 
 use clap::Parser;
 use pos::{
-    calculate_ring_position, Transaction, TransactionPayload,
+    calculate_ring_position, Transaction, TransactionPayload, SignatureType,
     messages::{serialize_message, WireMessage, SerializableTransaction},
 };
 use quinn::{ClientConfig, Endpoint};
