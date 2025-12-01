@@ -433,6 +433,15 @@ async fn handle_quic_connections(
                                             let _ = send.finish().await;
                                         }
                                     }
+                                } else {
+                                    // Log failure to help debug Windows/Mac mismatch
+                                    if let Err(e) = deserialize_message(&data) {
+                                        warn!(
+                                            "Failed to deserialize message ({} bytes): {}",
+                                            data.len(),
+                                            e
+                                        );
+                                    }
                                 }
                             }
                         });
