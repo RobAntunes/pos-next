@@ -14,8 +14,7 @@ use clap::Parser;
 use futures::stream::StreamExt;
 use libp2p::{
     core::upgrade,
-    mdns,
-    noise,
+    mdns, noise,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, SwarmBuilder, Transport,
 };
@@ -29,10 +28,10 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use pos::{
-    Sequencer, SequencerConfig, Transaction, ArenaMempool, MempoolConfig, TransactionPayload,
-    GeometricLedger,
-    WireMessage, SerializableBatchHeader, SerializableTransaction, PROTOCOL_VERSION,
-    messages::{serialize_message, deserialize_message},
+    messages::{deserialize_message, serialize_message},
+    ArenaMempool, GeometricLedger, MempoolConfig, Sequencer, SequencerConfig,
+    SerializableBatchHeader, SerializableTransaction, Transaction, TransactionPayload, WireMessage,
+    PROTOCOL_VERSION,
 };
 
 #[derive(Parser, Debug)]
@@ -49,11 +48,11 @@ struct Args {
     /// Node ID (for debugging)
     #[arg(short, long)]
     node_id: Option<String>,
-    
+
     /// Enable producer mode (generate test transactions)
     #[arg(long, default_value_t = false)]
     producer: bool,
-    
+
     /// Transactions per second to generate (producer mode)
     #[arg(long, default_value_t = 2_000_000)]
     tps: u64,
@@ -61,15 +60,19 @@ struct Args {
     /// Batch size for sequencer (optimal: 45k for L3 cache)
     #[arg(long, default_value_t = 45_000)]
     batch_size: usize,
-    
+
     /// Generate valid geometric positions (100% acceptance rate)
     /// Without this flag, random positions are generated (~20% acceptance)
     #[arg(long, default_value_t = false)]
     smart_gen: bool,
-    
+
     /// Maximum mempool size (default: 10M transactions)
     #[arg(long, default_value_t = 10_000_000)]
     mempool_size: usize,
+
+    /// Manual peer list (e.g., --peer 192.168.1.5:9000)
+    #[arg(long)]
+    peer: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,20 +119,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize Geometric Ledger
     let db_path = format!("./data/geometric_ledger_{}", args.port);
-    let ledger = Arc::new(GeometricLedger::new(&db_path).expect("Failed to initialize GeometricLedger"));
-    
+    let ledger =
+        Arc::new(GeometricLedger::new(&db_path).expect("Failed to initialize GeometricLedger"));
+
     // Initialize sequencer config template
     let sequencer_config = SequencerConfig {
         sequencer_id: generate_node_id(&node_name),
         batch_size: args.batch_size,
         ..Default::default()
     };
-    
+
     // Initialize Arena Mempool
     let arena = Arc::new(ArenaMempool::new());
     let arena_capacity = pos::ARENA_MAX_WORKERS * 16 * pos::ZONE_SIZE;
-    info!("📦 Arena mempool initialized ({} zones, {}M capacity, partitioned)", 
-          pos::ARENA_MAX_WORKERS * 16, arena_capacity / 1_000_000);
+    info!(
+        "📦 Arena mempool initialized ({} zones, {}M capacity, partitioned)",
+        pos::ARENA_MAX_WORKERS * 16,
+        arena_capacity / 1_000_000
+    );
 
     // Channel for discovered peers
     let (peer_tx, mut peer_rx) = mpsc::channel::<DiscoveredPeer>(100);
@@ -137,7 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start QUIC transport
     let quic_endpoint = start_quic_server(args.port).await?;
     let quic_endpoint_clone = quic_endpoint.clone();
-    
+
     let total_received = Arc::new(AtomicU64::new(0));
     let total_received_clone = total_received.clone();
     let arena_clone = arena.clone();
@@ -151,7 +158,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             total_received_clone,
             node_id,
             args.port,
-        ).await;
+        )
+        .await;
     });
 
     info!("✅ L2 (QUIC) listening on 0.0.0.0:{}", args.port);
@@ -165,12 +173,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     info!("✅ L0 (mDNS) discovery service started");
-    
+
     // Threading Model
     let total_cores = num_cpus::get();
     let num_pairs = (total_cores / 2).max(1).min(pos::ARENA_MAX_WORKERS);
-    info!("⚙️ Threading Model: {} Producer/Consumer pairs (using {} cores)", num_pairs, num_pairs * 2);
-    
+    info!(
+        "⚙️ Threading Model: {} Producer/Consumer pairs (using {} cores)",
+        num_pairs,
+        num_pairs * 2
+    );
+
     let batch_size = args.batch_size;
     let total_processed = Arc::new(AtomicU64::new(0));
     let total_processed_clone = total_processed.clone();
@@ -187,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let total_clone = total_processed_clone.clone();
         let shard_senders_clone = shard_senders.clone();
         let mut sequencer = Sequencer::new(sequencer_config.clone());
-        
+
         std::thread::spawn(move || {
             consumer_loop_blocking(
                 i, // worker_id
@@ -199,9 +211,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         });
     }
-    
+
     info!("✅ {} Consumer threads started", num_pairs);
-    
+
     // Spawn Producers
     if args.producer {
         for i in 0..10000u64 {
@@ -221,21 +233,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             tokio::spawn(async move {
                 producer_loop(
-                    arena_producer, 
-                    tps_per_producer, 
-                    node_id_producer, 
-                    smart_gen, 
-                    i // worker_id
-                ).await;
+                    arena_producer,
+                    tps_per_producer,
+                    node_id_producer,
+                    smart_gen,
+                    i, // worker_id
+                )
+                .await;
             });
         }
 
-        info!("✅ {} Producer loops started (target: {} TPS total)", num_pairs, args.tps);
+        info!(
+            "✅ {} Producer loops started (target: {} TPS total)",
+            num_pairs, args.tps
+        );
     }
-    
+
     println!();
     println!("📡 Scanning for peers on the local network...");
     println!();
+
+    // Manual Peering
+    if !args.peer.is_empty() {
+        info!("🔗 Connecting to {} manual peers...", args.peer.len());
+        for peer_addr in args.peer {
+            let endpoint = quic_endpoint.clone();
+            tokio::spawn(async move {
+                // Parse address (assume IP:PORT)
+                if let Ok(socket_addr) = peer_addr.parse::<SocketAddr>() {
+                    info!("👉 Connecting to manual peer: {}", socket_addr);
+                    if let Err(e) =
+                        connect_to_peer(endpoint, socket_addr.ip(), socket_addr.port()).await
+                    {
+                        warn!("Failed to connect to manual peer {}: {}", peer_addr, e);
+                    }
+                } else {
+                    warn!("Invalid peer address format: {}", peer_addr);
+                }
+            });
+        }
+    }
 
     // Main event loop
     loop {
@@ -252,7 +289,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     });
                 }
             }
-            
+
             _ = tokio::time::sleep(Duration::from_secs(5)) => {
                 let sequenced = total_processed.load(Ordering::Relaxed);
                 let applied = total_applied.load(Ordering::Relaxed);
@@ -286,7 +323,7 @@ fn start_shard_workers(
         let rx = receivers.remove(0);
         let ledger_clone = ledger.clone();
         let total_clone = total_applied.clone();
-        
+
         std::thread::spawn(move || {
             shard_worker_loop(shard_id, ledger_clone, rx, total_clone);
         });
@@ -309,17 +346,37 @@ async fn start_mdns_discovery(
     let behaviour = DiscoveryBehaviour { mdns };
     let mut swarm = SwarmBuilder::with_new_identity()
         .with_tokio()
-        .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
-        .with_behaviour(|_key| Ok(behaviour))?  
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )?
+        .with_behaviour(|_key| Ok(behaviour))?
         .build();
-    let listen_addr = if listen_port == 0 { "/ip4/0.0.0.0/tcp/0".parse()? } else { format!("/ip4/0.0.0.0/tcp/{}", listen_port).parse()? };
+    let listen_addr = if listen_port == 0 {
+        "/ip4/0.0.0.0/tcp/0".parse()?
+    } else {
+        format!("/ip4/0.0.0.0/tcp/{}", listen_port).parse()?
+    };
     swarm.listen_on(listen_addr)?;
-    info!("📡 L0 Discovery service started (advertising QUIC port {})", quic_port);
+    info!(
+        "📡 L0 Discovery service started (advertising QUIC port {})",
+        quic_port
+    );
     loop {
         if let Some(event) = swarm.next().await {
-            if let SwarmEvent::Behaviour(DiscoveryBehaviourEvent::Mdns(mdns::Event::Discovered(list))) = event {
+            if let SwarmEvent::Behaviour(DiscoveryBehaviourEvent::Mdns(mdns::Event::Discovered(
+                list,
+            ))) = event
+            {
                 for (peer_id, multiaddr) in list {
-                    let _ = peer_tx.send(DiscoveredPeer { peer_id, multiaddr, quic_port }).await;
+                    let _ = peer_tx
+                        .send(DiscoveredPeer {
+                            peer_id,
+                            multiaddr,
+                            quic_port,
+                        })
+                        .await;
                 }
             }
         }
@@ -332,7 +389,10 @@ async fn start_quic_server(port: u16) -> Result<Endpoint, Box<dyn std::error::Er
     let server_config = ServerConfig::with_single_cert(vec![cert], key)?;
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
     let mut endpoint = Endpoint::server(server_config, addr)?;
-    let crypto = rustls::ClientConfig::builder().with_safe_defaults().with_custom_certificate_verifier(Arc::new(NoCertificateVerification)).with_no_client_auth();
+    let crypto = rustls::ClientConfig::builder()
+        .with_safe_defaults()
+        .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+        .with_no_client_auth();
     let mut client_config = ClientConfig::new(Arc::new(crypto));
     client_config.transport_config(Arc::new(create_transport_config()));
     endpoint.set_default_client_config(client_config);
@@ -350,7 +410,7 @@ async fn handle_quic_connections(
     while let Some(connecting) = endpoint.accept().await {
         let arena = arena.clone();
         let total_received = total_received.clone();
-        
+
         tokio::spawn(async move {
             match connecting.await {
                 Ok(connection) => {
@@ -369,7 +429,9 @@ async fn handle_quic_connections(
                                             }
                                             let _ = send.finish().await;
                                         }
-                                        _ => { let _ = send.finish().await; }
+                                        _ => {
+                                            let _ = send.finish().await;
+                                        }
                                     }
                                 }
                             }
@@ -384,20 +446,32 @@ async fn handle_quic_connections(
 
 // ... (Helper functions like connect_to_peer, etc. remain the same) ...
 
-async fn connect_to_peer(endpoint: Endpoint, ip: IpAddr, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+async fn connect_to_peer(
+    endpoint: Endpoint,
+    ip: IpAddr,
+    port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
     let addr = SocketAddr::new(ip, port);
     let connection = endpoint.connect(addr, "localhost")?.await?;
     let (mut send, _) = connection.open_bi().await?;
-    let handshake = WireMessage::Handshake { version: PROTOCOL_VERSION, geometric_id: [0u8; 32], listen_port: port };
+    let handshake = WireMessage::Handshake {
+        version: PROTOCOL_VERSION,
+        geometric_id: [0u8; 32],
+        listen_port: port,
+    };
     let msg_bytes = serialize_message(&handshake)?;
     send.write_all(&msg_bytes).await?;
     send.finish().await?;
     Ok(())
 }
 
-fn generate_self_signed_cert() -> Result<(rustls::Certificate, rustls::PrivateKey), Box<dyn std::error::Error>> {
+fn generate_self_signed_cert(
+) -> Result<(rustls::Certificate, rustls::PrivateKey), Box<dyn std::error::Error>> {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
-    Ok((rustls::Certificate(cert.serialize_der()?), rustls::PrivateKey(cert.serialize_private_key_der())))
+    Ok((
+        rustls::Certificate(cert.serialize_der()?),
+        rustls::PrivateKey(cert.serialize_private_key_der()),
+    ))
 }
 
 fn create_transport_config() -> quinn::TransportConfig {
@@ -424,7 +498,15 @@ fn generate_node_id(name: &str) -> [u8; 32] {
 
 struct NoCertificateVerification;
 impl rustls::client::ServerCertVerifier for NoCertificateVerification {
-    fn verify_server_cert(&self, _: &rustls::Certificate, _: &[rustls::Certificate], _: &rustls::ServerName, _: &mut dyn Iterator<Item = &[u8]>, _: &[u8], _: std::time::SystemTime) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
+    fn verify_server_cert(
+        &self,
+        _: &rustls::Certificate,
+        _: &[rustls::Certificate],
+        _: &rustls::ServerName,
+        _: &mut dyn Iterator<Item = &[u8]>,
+        _: &[u8],
+        _: std::time::SystemTime,
+    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
         Ok(rustls::client::ServerCertVerified::assertion())
     }
 }
@@ -440,48 +522,58 @@ async fn producer_loop(
     smart_gen: bool,
     worker_id: usize,
 ) {
-    use std::time::Instant;
-    use rand::{Rng, SeedableRng};
     use rand::rngs::StdRng;
-    
+    use rand::{Rng, SeedableRng};
+    use std::time::Instant;
+
     let mut nonce: u64 = (worker_id as u64) * 100_000_000;
     let mut last_report = Instant::now();
     let mut produced_since_report: u64 = 0;
-    
+
     // Match burst size to Arena Zone Size (45,000)
-    let burst_size = pos::ZONE_SIZE; 
+    let burst_size = pos::ZONE_SIZE;
     let interval_ms = (burst_size as u64 * 1000) / target_tps.max(1);
-    
+
     let node_hash = blake3::hash(b"default-sequencer-node");
     let node_position = pos::calculate_ring_position(&node_hash);
 
     // Pre-compute accounts to avoid hashing in the hot loop
-    let accounts: std::sync::Arc<Vec<[u8; 32]>> = std::sync::Arc::new((0u64..10000).map(|i| {
-        let seed = i.to_le_bytes();
-        let hash = blake3::hash(&seed);
-        *hash.as_bytes()
-    }).collect());
+    let accounts: std::sync::Arc<Vec<[u8; 32]>> = std::sync::Arc::new(
+        (0u64..10000)
+            .map(|i| {
+                let seed = i.to_le_bytes();
+                let hash = blake3::hash(&seed);
+                *hash.as_bytes()
+            })
+            .collect(),
+    );
 
-    info!("🏭 Producer #{} starting: {} TPS target (Partition {})", worker_id, target_tps, worker_id);
+    info!(
+        "🏭 Producer #{} starting: {} TPS target (Partition {})",
+        worker_id, target_tps, worker_id
+    );
 
     loop {
         let burst_start = Instant::now();
         let arena_clone = arena.clone();
         let accounts_clone = accounts.clone();
         let current_nonce = nonce;
-        
+
         let submitted = tokio::task::spawn_blocking(move || {
-            let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
             let max_range = pos::MAX_DISTANCE;
-            
+
             // Pre-allocate batch vector
             let mut batch = Vec::with_capacity(burst_size);
-            
+
             for i in 0..burst_size {
                 // Deterministic lookup (O(1))
                 let sender_idx = ((current_nonce + i as u64) % 10000) as usize;
                 let sender = accounts_clone[sender_idx];
-                
+
                 let recipient_idx = (((current_nonce + i as u64) / 10000) % 10000) as usize;
                 let recipient = accounts_clone[recipient_idx];
 
@@ -503,7 +595,11 @@ async fn producer_loop(
                 if smart_gen {
                     let tx_hash = tx.hash();
                     let tx_position = pos::calculate_ring_position(&tx_hash);
-                    let distance = if tx_position >= node_position { tx_position - node_position } else { (u64::MAX - node_position) + tx_position + 1 };
+                    let distance = if tx_position >= node_position {
+                        tx_position - node_position
+                    } else {
+                        (u64::MAX - node_position) + tx_position + 1
+                    };
                     if distance <= max_range {
                         batch.push(tx);
                     }
@@ -511,7 +607,7 @@ async fn producer_loop(
                     batch.push(tx);
                 }
             }
-            
+
             // Submit entire batch to partition
             if !batch.is_empty() {
                 if arena_clone.submit_batch_partitioned(worker_id, &batch) {
@@ -519,18 +615,23 @@ async fn producer_loop(
                 }
             }
             0
-        }).await.unwrap_or(0);
-        
+        })
+        .await
+        .unwrap_or(0);
+
         nonce += burst_size as u64;
         produced_since_report += submitted;
-        
+
         if worker_id == 0 && last_report.elapsed() >= Duration::from_secs(5) {
             let actual_tps = produced_since_report as f64 / last_report.elapsed().as_secs_f64();
-            info!("🏭 Producer #{} stats: {} tx/s", worker_id, actual_tps as u64);
+            info!(
+                "🏭 Producer #{} stats: {} tx/s",
+                worker_id, actual_tps as u64
+            );
             produced_since_report = 0;
             last_report = Instant::now();
         }
-        
+
         let elapsed = burst_start.elapsed().as_millis() as u64;
         if elapsed < interval_ms {
             tokio::time::sleep(Duration::from_millis(interval_ms - elapsed)).await;
@@ -545,7 +646,7 @@ fn consumer_loop_blocking(
     sequencer: &mut Sequencer,
     arena: Arc<ArenaMempool>,
     total_processed: Arc<AtomicU64>,
-    _batch_size: usize, 
+    _batch_size: usize,
     shard_senders: Arc<Vec<std::sync::mpsc::SyncSender<ShardWork>>>,
 ) {
     use std::time::Instant;
@@ -553,7 +654,11 @@ fn consumer_loop_blocking(
     let mut batches_since_report: u64 = 0;
     let mut processed_since_report: u64 = 0;
 
-    tracing::info!("🔄 Consumer #{} starting (Partition {})", worker_id, worker_id);
+    tracing::info!(
+        "🔄 Consumer #{} starting (Partition {})",
+        worker_id,
+        worker_id
+    );
 
     loop {
         // Pull from partition
@@ -566,7 +671,7 @@ fn consumer_loop_blocking(
                     // batch_sender usage removed (Decoupled architecture)
                     batches_since_report += 1;
                 }
-                
+
                 // Update metrics for ALL processed transactions (accepted or rejected)
                 total_processed.fetch_add((accepted + rejected) as u64, Ordering::Relaxed);
                 processed_since_report += (accepted + rejected) as u64;
@@ -579,8 +684,12 @@ fn consumer_loop_blocking(
         if worker_id == 0 && last_report.elapsed() >= Duration::from_secs(5) {
             let actual_tps = processed_since_report as f64 / last_report.elapsed().as_secs_f64();
             let stats = arena.stats();
-            tracing::info!("⚡ Consumer Stats: {} batches, {} tx/s (Sequenced) | Arena: {} ready",
-                          batches_since_report, actual_tps as u64, stats.zones_ready);
+            tracing::info!(
+                "⚡ Consumer Stats: {} batches, {} tx/s (Sequenced) | Arena: {} ready",
+                batches_since_report,
+                actual_tps as u64,
+                stats.zones_ready
+            );
             batches_since_report = 0;
             processed_since_report = 0;
             last_report = Instant::now();
@@ -597,31 +706,44 @@ struct ShardWork {
 }
 
 fn shard_worker_loop(
-    shard_id: usize, 
-    ledger: Arc<GeometricLedger>, 
-    work_rx: std::sync::mpsc::Receiver<ShardWork>, 
-    total: Arc<AtomicU64>
+    shard_id: usize,
+    ledger: Arc<GeometricLedger>,
+    work_rx: std::sync::mpsc::Receiver<ShardWork>,
+    total: Arc<AtomicU64>,
 ) {
-    use std::collections::HashMap;
     use pos::Account;
-    
+    use std::collections::HashMap;
+
     // Process work items as they arrive
     while let Ok(work) = work_rx.recv() {
         let mut cache = HashMap::new();
         let mut count = 0;
-        
+
         // Zero-Copy: Access the slice of the shared batch
         let txs = &work.batch.transactions[work.start..work.start + work.count];
-        
+
         for ptx in txs {
-            if let pos::TransactionPayload::Transfer { recipient, amount, .. } = ptx.tx.payload {
+            if let pos::TransactionPayload::Transfer {
+                recipient, amount, ..
+            } = ptx.tx.payload
+            {
                 let sender = ptx.tx.sender;
                 // Simple ledger application logic
-                let mut s_acc = cache.remove(&sender).unwrap_or_else(|| ledger.get(&sender).unwrap_or(Account{pubkey:sender, ..Default::default()}));
+                let mut s_acc = cache.remove(&sender).unwrap_or_else(|| {
+                    ledger.get(&sender).unwrap_or(Account {
+                        pubkey: sender,
+                        ..Default::default()
+                    })
+                });
                 if s_acc.balance >= amount {
                     s_acc.balance -= amount;
                     cache.insert(sender, s_acc);
-                    let mut r_acc = cache.remove(&recipient).unwrap_or_else(|| ledger.get(&recipient).unwrap_or(Account{pubkey:recipient, ..Default::default()}));
+                    let mut r_acc = cache.remove(&recipient).unwrap_or_else(|| {
+                        ledger.get(&recipient).unwrap_or(Account {
+                            pubkey: recipient,
+                            ..Default::default()
+                        })
+                    });
                     r_acc.balance += amount;
                     cache.insert(recipient, r_acc);
                     count += 1;
