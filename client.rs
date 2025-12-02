@@ -15,8 +15,10 @@ use pos::{
 };
 use quinn::{ClientConfig, Endpoint};
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
 #[derive(Parser)]
 #[command(author, version, about = "Smart Client - Ring-Aware Load Tester")]
@@ -86,11 +88,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sent_0 = 0u64;
     let mut sent_1 = 0u64;
 
-    let delay_micros = if args.tps > 0 {
+    let delay_micros = Arc::new(AtomicU64::new(if args.tps > 0 {
         1_000_000 / args.tps
     } else {
         0
-    };
+    }));
+
+    // Start background poller for backpressure
+    let delay_clone = delay_micros.clone();
+    let conn0_clone = conn0.clone();
+    let conn1_clone = conn1.clone();
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        loop {
+            interval.tick().await;
+
+            // Check Shard 0
+            if let Ok((mut send, mut recv)) = conn0_clone.open_bi().await {
+                let msg = WireMessage::MempoolStatus;
+                let msg_bytes = serialize_message(&msg).unwrap();
+                if send.write_all(&msg_bytes).await.is_ok() {
+                    if send.finish().await.is_ok() {
+                        if let Ok(response_data) = recv.read_to_end(1024).await {
+                            if let Ok(WireMessage::MempoolStatusResponse {
+                                pending_count,
+                                capacity_tps,
+                            }) = deserialize_message(&response_data)
+                            {
+                                adjust_rate(&delay_clone, pending_count, capacity_tps);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check Shard 1 (similar logic, could be refactored)
+            if let Ok((mut send, mut recv)) = conn1_clone.open_bi().await {
+                let msg = WireMessage::MempoolStatus;
+                let msg_bytes = serialize_message(&msg).unwrap();
+                if send.write_all(&msg_bytes).await.is_ok() {
+                    if send.finish().await.is_ok() {
+                        if let Ok(response_data) = recv.read_to_end(1024).await {
+                            if let Ok(WireMessage::MempoolStatusResponse {
+                                pending_count,
+                                capacity_tps,
+                            }) = deserialize_message(&response_data)
+                            {
+                                adjust_rate(&delay_clone, pending_count, capacity_tps);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Batch size for network efficiency
+    let batch_size = 1000;
+    let mut batch_0 = Vec::with_capacity(batch_size);
+    let mut batch_1 = Vec::with_capacity(batch_size);
 
     for i in 0..args.count {
         // Generate valid HashReveal credentials (Physics-bound security)
@@ -122,34 +179,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tx_pos = calculate_ring_position(&tx_hash);
         let midpoint = u64::MAX / 2;
 
-        // Route to correct shard
-        let target = if args.dumb {
-            // Dumb mode: always send to Shard 0
+        // Route to correct shard buffer
+        if args.dumb {
+            batch_0.push(tx);
             sent_0 += 1;
-            &conn0
         } else if tx_pos < midpoint {
-            // Smart mode: send to Shard 0
+            batch_0.push(tx);
             sent_0 += 1;
-            &conn0
         } else {
-            // Smart mode: send to Shard 1
+            batch_1.push(tx);
             sent_1 += 1;
-            &conn1
-        };
+        }
 
-        // Send transaction
-        let msg = WireMessage::TransactionSubmission {
-            tx: SerializableTransaction::from(tx),
-        };
-        let msg_bytes = serialize_message(&msg)?;
+        // Flush batches if full
+        if batch_0.len() >= batch_size {
+            send_batch(&conn0, &batch_0).await?;
+            batch_0.clear();
+        }
+        if batch_1.len() >= batch_size {
+            send_batch(&conn1, &batch_1).await?;
+            batch_1.clear();
+        }
 
-        let (mut send, _recv) = target.open_bi().await?;
-        send.write_all(&msg_bytes).await?;
-        send.finish().await?;
-
-        // Rate limit if requested
-        if delay_micros > 0 {
-            tokio::time::sleep(Duration::from_micros(delay_micros)).await;
+        // Rate limit if requested (approximate)
+        // Rate limit if requested (approximate)
+        let current_delay = delay_micros.load(Ordering::Relaxed);
+        if current_delay > 0 && i % batch_size as u64 == 0 {
+            tokio::time::sleep(Duration::from_micros(current_delay * batch_size as u64)).await;
         }
 
         // Progress report every 10k
@@ -192,6 +248,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("✨ SMART MODE: Transactions routed to correct shards");
         println!("   Minimal bridging required");
     }
+
+    Ok(())
+}
+
+async fn send_batch(
+    conn: &quinn::Connection,
+    txs: &[Transaction],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let serializable_txs: Vec<SerializableTransaction> = txs
+        .iter()
+        .map(|tx| SerializableTransaction::from(tx.clone()))
+        .collect();
+
+    let msg = WireMessage::BatchSubmission {
+        txs: serializable_txs,
+    };
+    let msg_bytes = serialize_message(&msg)?;
+
+    // Open a single stream for the whole batch
+    let (mut send, _recv) = conn.open_bi().await?;
+    send.write_all(&msg_bytes).await?;
+    send.finish().await?;
 
     Ok(())
 }

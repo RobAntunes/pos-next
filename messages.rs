@@ -9,7 +9,7 @@ use blake3::Hash;
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
-use crate::types::{BatchHeader, Transaction, TransactionPayload, SignatureType};
+use crate::types::{BatchHeader, SignatureType, Transaction, TransactionPayload};
 
 /// Network protocol version
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -53,6 +53,12 @@ pub enum WireMessage {
     TransactionSubmission {
         /// The transaction to add to mempool
         tx: SerializableTransaction,
+    },
+
+    /// Submit a batch of transactions to peer's mempool (High Throughput)
+    BatchSubmission {
+        /// List of transactions
+        txs: Vec<SerializableTransaction>,
     },
 
     /// Request peer's current mempool size (for load balancing)
@@ -140,12 +146,7 @@ impl From<Transaction> for SerializableTransaction {
 impl From<SerializableTransaction> for Transaction {
     fn from(tx: SerializableTransaction) -> Self {
         // Re-create transaction (recomputes hash eagerly)
-        Transaction::new(
-            tx.sender,
-            tx.payload,
-            tx.signature,
-            tx.timestamp
-        )
+        Transaction::new(tx.sender, tx.payload, tx.signature, tx.timestamp)
     }
 }
 
@@ -186,7 +187,11 @@ mod tests {
         let deserialized: WireMessage = deserialize_message(&bytes).unwrap();
 
         match deserialized {
-            WireMessage::Handshake { version, geometric_id, listen_port } => {
+            WireMessage::Handshake {
+                version,
+                geometric_id,
+                listen_port,
+            } => {
                 assert_eq!(version, PROTOCOL_VERSION);
                 assert_eq!(geometric_id, [42u8; 32]);
                 assert_eq!(listen_port, 9000);
@@ -236,10 +241,10 @@ mod tests {
 
         let msg = WireMessage::TransactionSubmission { tx };
         let bytes = serialize_message(&msg).unwrap();
-        
+
         // Ensure it deserializes back
         let deserialized: WireMessage = deserialize_message(&bytes).unwrap();
-        
+
         if let WireMessage::TransactionSubmission { tx: rx } = deserialized {
             match rx.signature {
                 SignatureType::Ed25519(sig) => assert_eq!(sig, [0xAA; 64]),

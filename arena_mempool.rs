@@ -101,7 +101,7 @@ impl ArenaZone {
 }
 
 /// Arena-based mempool with zero-copy batching
-/// 
+///
 /// PARTITIONED DESIGN: Each worker (producer/consumer pair) owns a slice of zones.
 /// Worker N owns zones [N * ZONES_PER_WORKER .. (N+1) * ZONES_PER_WORKER)
 /// This eliminates all contention between workers!
@@ -185,7 +185,7 @@ impl ArenaMempool {
             if zone.is_ready() {
                 // Take transactions
                 let txs = zone.take().to_vec();
-                
+
                 // Mark zone as free and advance read index
                 zone.mark_free();
                 self.worker_read_idx[worker_id].store(local_idx + attempt + 1, Ordering::Relaxed);
@@ -233,16 +233,17 @@ impl ArenaMempool {
 
     /// Get number of ready batches
     pub fn ready_count(&self) -> usize {
-        self.zones
-            .iter()
-            .filter(|z| z.is_ready())
-            .count()
+        self.zones.iter().filter(|z| z.is_ready()).count()
     }
 
     /// Get statistics
     pub fn stats(&self) -> ArenaStats {
         let ready = self.ready_count();
-        let free = self.zones.iter().filter(|z| z.state.load(Ordering::Relaxed) == FREE).count();
+        let free = self
+            .zones
+            .iter()
+            .filter(|z| z.state.load(Ordering::Relaxed) == FREE)
+            .count();
         let writing = NUM_ZONES - ready - free;
 
         ArenaStats {
@@ -293,7 +294,7 @@ mod tests {
     #[test]
     fn test_arena_submit_pull() {
         let arena = ArenaMempool::new();
-        
+
         // Submit batch
         let txs: Vec<_> = (0..1000).map(make_test_tx).collect();
         assert!(arena.submit_batch(&txs));
@@ -306,7 +307,7 @@ mod tests {
     #[test]
     fn test_arena_full() {
         let arena = ArenaMempool::new();
-        
+
         // Fill all zones
         for _ in 0..NUM_ZONES {
             let txs: Vec<_> = (0..1000).map(make_test_tx).collect();
@@ -327,7 +328,7 @@ mod tests {
     #[test]
     fn test_arena_stats() {
         let arena = ArenaMempool::new();
-        
+
         let txs: Vec<_> = (0..1000).map(make_test_tx).collect();
         arena.submit_batch(&txs);
 

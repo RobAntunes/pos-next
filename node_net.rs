@@ -13,15 +13,14 @@
 use clap::Parser;
 use futures::stream::StreamExt;
 use libp2p::{
-    core::upgrade,
     mdns, noise,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, SwarmBuilder, Transport,
 };
 use quinn::{ClientConfig, Endpoint, ServerConfig};
-use std::convert::TryInto;
+
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -29,9 +28,8 @@ use tracing::{info, warn};
 
 use pos::{
     messages::{deserialize_message, serialize_message},
-    ArenaMempool, GeometricLedger, MempoolConfig, Sequencer, SequencerConfig,
-    SerializableBatchHeader, SerializableTransaction, Transaction, TransactionPayload, WireMessage,
-    PROTOCOL_VERSION,
+    ArenaMempool, GeometricLedger, Sequencer, SequencerConfig, Transaction, TransactionPayload,
+    WireMessage, PROTOCOL_VERSION,
 };
 
 #[derive(Parser, Debug)]
@@ -69,10 +67,6 @@ struct Args {
     /// Maximum mempool size (default: 1M transactions)
     #[arg(long, default_value_t = 1_000_000)]
     mempool_size: usize,
-
-    /// Manual peer list (e.g., --peer 192.168.1.5:9000)
-    #[arg(long)]
-    peer: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +123,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
+    // Threading Model
+    let total_cores = num_cpus::get();
+    let num_pairs = (total_cores / 2).max(1).min(pos::ARENA_MAX_WORKERS);
+    info!(
+        "⚙️ Threading Model: {} Producer/Consumer pairs (using {} cores)",
+        num_pairs,
+        num_pairs * 2
+    );
+
     // Initialize Arena Mempool
     let arena = Arc::new(ArenaMempool::new());
     let arena_capacity = pos::ARENA_MAX_WORKERS * 16 * pos::ZONE_SIZE;
@@ -158,6 +161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             total_received_clone,
             node_id,
             args.port,
+            num_pairs,
         )
         .await;
     });
@@ -173,15 +177,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     info!("✅ L0 (mDNS) discovery service started");
-
-    // Threading Model
-    let total_cores = num_cpus::get();
-    let num_pairs = (total_cores / 2).max(1).min(pos::ARENA_MAX_WORKERS);
-    info!(
-        "⚙️ Threading Model: {} Producer/Consumer pairs (using {} cores)",
-        num_pairs,
-        num_pairs * 2
-    );
 
     let batch_size = args.batch_size;
     let total_processed = Arc::new(AtomicU64::new(0));
@@ -251,29 +246,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!("🌐 Starting Geometric Turbine Network Test...");
-    println!("🚀 VERSION: HASH_REVEAL_DEBUG_v2 (Manual Peering + Logging)");
+    println!("🚀 Geometric Turbine Network (HashReveal Enabled)");
     println!();
-
-    // Manual Peering
-    if !args.peer.is_empty() {
-        info!("🔗 Connecting to {} manual peers...", args.peer.len());
-        for peer_addr in args.peer {
-            let endpoint = quic_endpoint.clone();
-            tokio::spawn(async move {
-                // Parse address (assume IP:PORT)
-                if let Ok(socket_addr) = peer_addr.parse::<SocketAddr>() {
-                    info!("👉 Connecting to manual peer: {}", socket_addr);
-                    if let Err(e) =
-                        connect_to_peer(endpoint, socket_addr.ip(), socket_addr.port()).await
-                    {
-                        warn!("Failed to connect to manual peer {}: {}", peer_addr, e);
-                    }
-                } else {
-                    warn!("Invalid peer address format: {}", peer_addr);
-                }
-            });
-        }
-    }
 
     // Main event loop
     loop {
@@ -408,10 +382,14 @@ async fn handle_quic_connections(
     total_received: Arc<AtomicU64>,
     node_id: [u8; 32],
     listen_port: u16,
+    num_active_workers: usize,
 ) {
+    let next_worker = Arc::new(AtomicUsize::new(0));
+
     while let Some(connecting) = endpoint.accept().await {
         let arena = arena.clone();
         let total_received = total_received.clone();
+        let next_worker = next_worker.clone();
 
         tokio::spawn(async move {
             match connecting.await {
@@ -419,6 +397,7 @@ async fn handle_quic_connections(
                     while let Ok((mut send, mut recv)) = connection.accept_bi().await {
                         let arena = arena.clone();
                         let total_received = total_received.clone();
+                        let next_worker = next_worker.clone();
                         tokio::spawn(async move {
                             if let Ok(data) = recv.read_to_end(10 * 1024 * 1024).await {
                                 if let Ok(msg) = deserialize_message(&data) {
@@ -429,6 +408,48 @@ async fn handle_quic_connections(
                                             if arena.submit_batch(&[tx]) {
                                                 total_received.fetch_add(1, Ordering::Relaxed);
                                             }
+                                            let _ = send.finish().await;
+                                        }
+                                        WireMessage::BatchSubmission { txs } => {
+                                            let txs: Vec<Transaction> =
+                                                txs.into_iter().map(|tx| tx.into()).collect();
+                                            let count = txs.len();
+
+                                            // Round-robin to active workers only
+                                            let worker_id = next_worker
+                                                .fetch_add(1, Ordering::Relaxed)
+                                                % num_active_workers;
+
+                                            // Try to submit to the chosen worker's partition
+                                            if arena.submit_batch_partitioned(worker_id, &txs) {
+                                                total_received
+                                                    .fetch_add(count as u64, Ordering::Relaxed);
+                                            } else {
+                                                // If full, try one more random worker as fallback
+                                                let retry_worker =
+                                                    (worker_id + 1) % num_active_workers;
+                                                if arena
+                                                    .submit_batch_partitioned(retry_worker, &txs)
+                                                {
+                                                    total_received
+                                                        .fetch_add(count as u64, Ordering::Relaxed);
+                                                } else {
+                                                    warn!(
+                                                        "Arena full! Dropped batch of {} txs",
+                                                        count
+                                                    );
+                                                }
+                                            }
+                                            let _ = send.finish().await;
+                                        }
+                                        WireMessage::MempoolStatus => {
+                                            let stats = arena.stats();
+                                            let response = WireMessage::MempoolStatusResponse {
+                                                pending_count: stats.total_submitted as u64, // Approximate pending
+                                                capacity_tps: 2_000_000, // Hardcoded for now, could be dynamic
+                                            };
+                                            let msg_bytes = serialize_message(&response).unwrap();
+                                            let _ = send.write_all(&msg_bytes).await;
                                             let _ = send.finish().await;
                                         }
                                         _ => {
