@@ -13,15 +13,14 @@ static GLOBAL: MiMalloc = MiMalloc;
 use clap::Parser;
 use futures::stream::StreamExt;
 use libp2p::{
-    core::upgrade,
     mdns, noise,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, SwarmBuilder, Transport,
 };
 use quinn::{ClientConfig, Endpoint, ServerConfig};
-use std::convert::TryInto;
+
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -29,9 +28,8 @@ use tracing::{info, warn};
 
 use pos::{
     messages::{deserialize_message, serialize_message},
-    ArenaMempool, GeometricLedger, MempoolConfig, Sequencer, SequencerConfig,
-    SerializableBatchHeader, SerializableTransaction, Transaction, TransactionPayload, WireMessage,
-    PROTOCOL_VERSION,
+    ArenaMempool, GeometricLedger, Sequencer, SequencerConfig, Transaction, TransactionPayload,
+    WireMessage, PROTOCOL_VERSION,
 };
 
 #[derive(Parser, Debug)]
