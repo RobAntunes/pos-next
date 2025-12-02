@@ -311,16 +311,17 @@ fn start_shard_workers(
     let mut senders = Vec::new();
     let mut receivers = Vec::new();
 
-    for _ in 0..256 {
+    let num_shards = num_cpus::get();
+    for _ in 0..num_shards {
         // Buffer size 1000 batches per shard is plenty
         let (tx, rx) = std::sync::mpsc::sync_channel::<ShardWork>(1000);
         senders.push(tx);
         receivers.push(rx);
     }
 
-    info!("💾 Starting 256 shard workers (Direct Dispatch)");
+    info!("💾 Starting {} shard workers (Direct Dispatch)", num_shards);
 
-    for shard_id in 0..256 {
+    for shard_id in 0..num_shards {
         let rx = receivers.remove(0);
         let ledger_clone = ledger.clone();
         let total_clone = total_applied.clone();
