@@ -92,6 +92,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         0
     };
 
+    // Batch size for network efficiency
+    let batch_size = 1000;
+    let mut batch_0 = Vec::with_capacity(batch_size);
+    let mut batch_1 = Vec::with_capacity(batch_size);
+
     for i in 0..args.count {
         // Generate valid HashReveal credentials (Physics-bound security)
         // Secret is derived from index (for reproducibility)
@@ -122,34 +127,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tx_pos = calculate_ring_position(&tx_hash);
         let midpoint = u64::MAX / 2;
 
-        // Route to correct shard
-        let target = if args.dumb {
-            // Dumb mode: always send to Shard 0
+        // Route to correct shard buffer
+        if args.dumb {
+            batch_0.push(tx);
             sent_0 += 1;
-            &conn0
         } else if tx_pos < midpoint {
-            // Smart mode: send to Shard 0
+            batch_0.push(tx);
             sent_0 += 1;
-            &conn0
         } else {
-            // Smart mode: send to Shard 1
+            batch_1.push(tx);
             sent_1 += 1;
-            &conn1
-        };
+        }
 
-        // Send transaction
-        let msg = WireMessage::TransactionSubmission {
-            tx: SerializableTransaction::from(tx),
-        };
-        let msg_bytes = serialize_message(&msg)?;
+        // Flush batches if full
+        if batch_0.len() >= batch_size {
+            send_batch(&conn0, &batch_0).await?;
+            batch_0.clear();
+        }
+        if batch_1.len() >= batch_size {
+            send_batch(&conn1, &batch_1).await?;
+            batch_1.clear();
+        }
 
-        let (mut send, _recv) = target.open_bi().await?;
-        send.write_all(&msg_bytes).await?;
-        send.finish().await?;
-
-        // Rate limit if requested
-        if delay_micros > 0 {
-            tokio::time::sleep(Duration::from_micros(delay_micros)).await;
+        // Rate limit if requested (approximate)
+        if delay_micros > 0 && i % batch_size as u64 == 0 {
+            tokio::time::sleep(Duration::from_micros(delay_micros * batch_size as u64)).await;
         }
 
         // Progress report every 10k
@@ -192,6 +194,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("✨ SMART MODE: Transactions routed to correct shards");
         println!("   Minimal bridging required");
     }
+
+    Ok(())
+}
+
+async fn send_batch(
+    conn: &quinn::Connection,
+    txs: &[Transaction],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let serializable_txs: Vec<SerializableTransaction> = txs
+        .iter()
+        .map(|tx| SerializableTransaction::from(tx.clone()))
+        .collect();
+
+    let msg = WireMessage::BatchSubmission {
+        txs: serializable_txs,
+    };
+    let msg_bytes = serialize_message(&msg)?;
+
+    // Open a single stream for the whole batch
+    let (mut send, _recv) = conn.open_bi().await?;
+    send.write_all(&msg_bytes).await?;
+    send.finish().await?;
 
     Ok(())
 }

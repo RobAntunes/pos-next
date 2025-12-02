@@ -5,9 +5,10 @@
 //! - L2 (Transport): QUIC-based high-speed data transport
 //! - Automatic handover from discovery to data plane
 
-// use mimalloc::MiMalloc;
-// #[global_allocator]
-// static GLOBAL: MiMalloc = MiMalloc;
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 use clap::Parser;
 use futures::stream::StreamExt;
@@ -402,6 +403,16 @@ async fn handle_quic_connections(
                                             // Use legacy submission for random individual txs
                                             if arena.submit_batch(&[tx]) {
                                                 total_received.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            let _ = send.finish().await;
+                                        }
+                                        WireMessage::BatchSubmission { txs } => {
+                                            let txs: Vec<Transaction> =
+                                                txs.into_iter().map(|tx| tx.into()).collect();
+                                            let count = txs.len();
+                                            if arena.submit_batch(&txs) {
+                                                total_received
+                                                    .fetch_add(count as u64, Ordering::Relaxed);
                                             }
                                             let _ = send.finish().await;
                                         }
