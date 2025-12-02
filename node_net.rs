@@ -154,6 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             total_received_clone,
             node_id,
             args.port,
+            num_pairs,
         )
         .await;
     });
@@ -383,10 +384,14 @@ async fn handle_quic_connections(
     total_received: Arc<AtomicU64>,
     node_id: [u8; 32],
     listen_port: u16,
+    num_active_workers: usize,
 ) {
+    let next_worker = Arc::new(AtomicUsize::new(0));
+
     while let Some(connecting) = endpoint.accept().await {
         let arena = arena.clone();
         let total_received = total_received.clone();
+        let next_worker = next_worker.clone();
 
         tokio::spawn(async move {
             match connecting.await {
@@ -410,9 +415,31 @@ async fn handle_quic_connections(
                                             let txs: Vec<Transaction> =
                                                 txs.into_iter().map(|tx| tx.into()).collect();
                                             let count = txs.len();
-                                            if arena.submit_batch(&txs) {
+
+                                            // Round-robin to active workers only
+                                            let worker_id = next_worker
+                                                .fetch_add(1, Ordering::Relaxed)
+                                                % num_active_workers;
+
+                                            // Try to submit to the chosen worker's partition
+                                            if arena.submit_batch_partitioned(worker_id, &txs) {
                                                 total_received
                                                     .fetch_add(count as u64, Ordering::Relaxed);
+                                            } else {
+                                                // If full, try one more random worker as fallback
+                                                let retry_worker =
+                                                    (worker_id + 1) % num_active_workers;
+                                                if arena
+                                                    .submit_batch_partitioned(retry_worker, &txs)
+                                                {
+                                                    total_received
+                                                        .fetch_add(count as u64, Ordering::Relaxed);
+                                                } else {
+                                                    warn!(
+                                                        "Arena full! Dropped batch of {} txs",
+                                                        count
+                                                    );
+                                                }
                                             }
                                             let _ = send.finish().await;
                                         }
