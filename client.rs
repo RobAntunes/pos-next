@@ -15,8 +15,10 @@ use pos::{
 };
 use quinn::{ClientConfig, Endpoint};
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
 #[derive(Parser)]
 #[command(author, version, about = "Smart Client - Ring-Aware Load Tester")]
@@ -86,11 +88,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sent_0 = 0u64;
     let mut sent_1 = 0u64;
 
-    let delay_micros = if args.tps > 0 {
+    let delay_micros = Arc::new(AtomicU64::new(if args.tps > 0 {
         1_000_000 / args.tps
     } else {
         0
-    };
+    }));
+
+    // Start background poller for backpressure
+    let delay_clone = delay_micros.clone();
+    let conn0_clone = conn0.clone();
+    let conn1_clone = conn1.clone();
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        loop {
+            interval.tick().await;
+
+            // Check Shard 0
+            if let Ok((mut send, mut recv)) = conn0_clone.open_bi().await {
+                let msg = WireMessage::MempoolStatus;
+                let msg_bytes = serialize_message(&msg).unwrap();
+                if send.write_all(&msg_bytes).await.is_ok() {
+                    if send.finish().await.is_ok() {
+                        if let Ok(response_data) = recv.read_to_end(1024).await {
+                            if let Ok(WireMessage::MempoolStatusResponse {
+                                pending_count,
+                                capacity_tps,
+                            }) = deserialize_message(&response_data)
+                            {
+                                adjust_rate(&delay_clone, pending_count, capacity_tps);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check Shard 1 (similar logic, could be refactored)
+            if let Ok((mut send, mut recv)) = conn1_clone.open_bi().await {
+                let msg = WireMessage::MempoolStatus;
+                let msg_bytes = serialize_message(&msg).unwrap();
+                if send.write_all(&msg_bytes).await.is_ok() {
+                    if send.finish().await.is_ok() {
+                        if let Ok(response_data) = recv.read_to_end(1024).await {
+                            if let Ok(WireMessage::MempoolStatusResponse {
+                                pending_count,
+                                capacity_tps,
+                            }) = deserialize_message(&response_data)
+                            {
+                                adjust_rate(&delay_clone, pending_count, capacity_tps);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
 
     // Batch size for network efficiency
     let batch_size = 1000;
@@ -150,8 +202,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Rate limit if requested (approximate)
-        if delay_micros > 0 && i % batch_size as u64 == 0 {
-            tokio::time::sleep(Duration::from_micros(delay_micros * batch_size as u64)).await;
+        // Rate limit if requested (approximate)
+        let current_delay = delay_micros.load(Ordering::Relaxed);
+        if current_delay > 0 && i % batch_size as u64 == 0 {
+            tokio::time::sleep(Duration::from_micros(current_delay * batch_size as u64)).await;
         }
 
         // Progress report every 10k

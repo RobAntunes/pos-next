@@ -442,6 +442,16 @@ async fn handle_quic_connections(
                                             }
                                             let _ = send.finish().await;
                                         }
+                                        WireMessage::MempoolStatus => {
+                                            let stats = arena.stats();
+                                            let response = WireMessage::MempoolStatusResponse {
+                                                pending_count: stats.total_submitted as u64, // Approximate pending
+                                                capacity_tps: 2_000_000, // Hardcoded for now, could be dynamic
+                                            };
+                                            let msg_bytes = serialize_message(&response).unwrap();
+                                            let _ = send.write_all(&msg_bytes).await;
+                                            let _ = send.finish().await;
+                                        }
                                         _ => {
                                             let _ = send.finish().await;
                                         }
