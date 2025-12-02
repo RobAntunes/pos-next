@@ -314,10 +314,13 @@ fn start_shard_workers(
         senders.push(tx);
         let ledger_clone = ledger.clone();
         let total_clone = total_applied.clone();
-            shard_worker_loop(shard_id, ledger_clone, rx, total_clone);
+
+        std::thread::spawn(move || {
+            shard_worker_loop(i, ledger_clone, rx, total_clone);
         });
     }
 
+    info!("💾 Starting {} shard workers (Direct Dispatch)", num_shards);
     senders
 }
 
