@@ -15,7 +15,7 @@ use futures::stream::StreamExt;
 use libp2p::{
     mdns, noise,
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Multiaddr, PeerId, SwarmBuilder, Transport,
+    tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
 };
 use quinn::{ClientConfig, Endpoint, ServerConfig};
 
@@ -310,7 +310,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             _ = tokio::time::sleep(Duration::from_secs(5)) => {
                 let sequenced = total_processed.load(Ordering::Relaxed);
-                let applied = total_applied.load(Ordering::Relaxed);
+                let _applied = total_applied.load(Ordering::Relaxed);
                 let stats = arena.stats();
                 let applied = total_applied.load(Ordering::Relaxed);
                 let rejected = total_rejected.load(Ordering::Relaxed);
@@ -429,8 +429,8 @@ async fn handle_quic_connections(
     endpoint: Endpoint,
     arena: Arc<ArenaMempool>, // Changed from Mempool
     total_received: Arc<AtomicU64>,
-    node_id: [u8; 32],
-    listen_port: u16,
+    _node_id: [u8; 32],
+    _listen_port: u16,
     num_active_workers: usize,
 ) {
     let next_worker = Arc::new(AtomicUsize::new(0));
@@ -599,12 +599,12 @@ impl rustls::client::ServerCertVerifier for NoCertificateVerification {
 async fn producer_loop(
     arena: Arc<ArenaMempool>,
     target_tps: u64,
-    sender_id: [u8; 32],
+    _sender_id: [u8; 32],
     smart_gen: bool,
     worker_id: usize,
 ) {
-    use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    // use rand::rngs::StdRng;
+    // use rand::{Rng, SeedableRng};
     use std::time::Instant;
 
     let mut nonce: u64 = (worker_id as u64) * 100_000_000;
@@ -745,7 +745,7 @@ fn consumer_loop_blocking(
         // Pull from partition
         if let Some(txs) = arena.pull_batch_partitioned(worker_id) {
             if !txs.is_empty() {
-                let batch_start = Instant::now();
+                let _batch_start = Instant::now();
                 let (accepted, rejected) = sequencer.process_batch(txs);
 
                 if let Some(batch) = sequencer.finalize_batch() {

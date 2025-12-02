@@ -1,10 +1,10 @@
 //! Geometric Ledger - Persistent, Crash-Safe, Windows-Compatible
 
 use memmap2::{MmapMut, MmapOptions};
+use rayon::prelude::*;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
-use rayon::prelude::*;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 // Fixed-size account (pad to 128 bytes)
 #[repr(C, align(128))]
@@ -14,7 +14,7 @@ pub struct Account {
     pub balance: u64,
     pub nonce: u64,
     pub last_modified: u64,
-    pub _padding: [u8; 80],  // 32 + 8 + 8 + 8 + 80 = 136, but align(128) rounds to 128
+    pub _padding: [u8; 80], // 32 + 8 + 8 + 8 + 80 = 136, but align(128) rounds to 128
 }
 
 impl Default for Account {
@@ -30,7 +30,7 @@ impl Default for Account {
 }
 
 const ACCOUNT_SIZE: usize = 128;
-const SHARD_COUNT: usize = 256;
+const SHARD_COUNT: usize = 16;
 // 1M accounts per shard (256 shards × 1M = 256M total capacity)
 // With 8-byte alignment (down from 64), uses ~4GB RAM instead of 32GB
 const ACCOUNTS_PER_SHARD: usize = 1_000_000;
@@ -64,7 +64,9 @@ impl AtomicSlot {
 
     fn unpack(&self) -> Option<(u32, u32, u8)> {
         let val = self.data.load(Ordering::Acquire);
-        if val == Self::EMPTY { return None; }
+        if val == Self::EMPTY {
+            return None;
+        }
         let hash = (val & 0xFFFF_FFFF) as u32;
         let offset = ((val >> 32) & 0x00FF_FFFF) as u32;
         let distance = ((val >> 56) & 0x7F) as u8;
@@ -105,7 +107,8 @@ impl Shard {
             .map_err(|e| format!("Failed to open shard file: {}", e))?;
 
         if file.metadata().map_err(|e| e.to_string())?.len() < size {
-            file.set_len(size).map_err(|e| format!("Failed to set length: {}", e))?;
+            file.set_len(size)
+                .map_err(|e| format!("Failed to set length: {}", e))?;
         }
 
         let mmap = unsafe {
@@ -145,14 +148,16 @@ impl Shard {
                     if slot.data.load(Ordering::Relaxed) == AtomicSlot::EMPTY {
                         slot.data.store(
                             AtomicSlot::pack(hash, offset as u32, distance),
-                            Ordering::Relaxed
+                            Ordering::Relaxed,
                         );
                         count += 1;
                         break;
                     }
                     idx = (idx + 1) % INDEX_SIZE;
                     distance += 1;
-                    if distance > 127 { break; }
+                    if distance > 127 {
+                        break;
+                    }
                 }
             }
         }
@@ -174,11 +179,18 @@ impl Shard {
                 if offset >= ACCOUNTS_PER_SHARD as u32 {
                     return Err("Shard full".to_string());
                 }
-                
+
                 let packed = AtomicSlot::pack(hash, offset, distance);
-                if slot.data.compare_exchange(
-                    AtomicSlot::EMPTY, packed, Ordering::Release, Ordering::Acquire
-                ).is_ok() {
+                if slot
+                    .data
+                    .compare_exchange(
+                        AtomicSlot::EMPTY,
+                        packed,
+                        Ordering::Release,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
                     self.write_account(offset as usize, account);
                     self.write_count.fetch_add(1, Ordering::Relaxed);
                     return Ok(());
@@ -198,7 +210,9 @@ impl Shard {
 
             idx = (idx + 1) % INDEX_SIZE;
             distance += 1;
-            if distance > 127 { return Err("Index full".to_string()); }
+            if distance > 127 {
+                return Err("Index full".to_string());
+            }
         }
     }
 
@@ -228,7 +242,7 @@ impl Shard {
             std::ptr::copy_nonoverlapping(
                 account as *const Account as *const u8,
                 dst,
-                ACCOUNT_SIZE
+                ACCOUNT_SIZE,
             );
         }
     }
@@ -236,9 +250,7 @@ impl Shard {
     fn read_account(&self, offset: usize) -> Account {
         let start = offset * ACCOUNT_SIZE;
         let src = unsafe { self.mmap.as_ptr().add(start) };
-        unsafe {
-            std::ptr::read_unaligned(src as *const Account)
-        }
+        unsafe { std::ptr::read_unaligned(src as *const Account) }
     }
 
     fn flush(&self) -> Result<(), String> {
@@ -258,31 +270,39 @@ impl Shard {
         }
 
         // Phase 1: Parallel classification - find existing accounts
-        let classifications: Vec<_> = updates.par_iter().map(|(pk, _)| {
-            let hash = hash_pubkey(pk);
-            let mut idx = (hash as usize) % INDEX_SIZE;
+        let classifications: Vec<_> = updates
+            .par_iter()
+            .map(|(pk, _)| {
+                let hash = hash_pubkey(pk);
+                let mut idx = (hash as usize) % INDEX_SIZE;
 
-            // Search for existing entry
-            for _ in 0..128 {
-                if let Some((slot_hash, offset, _)) = self.index[idx].unpack() {
-                    if slot_hash == hash {
-                        let acc = self.read_account(offset as usize);
-                        if &acc.pubkey == *pk {
-                            return (hash, idx, Some(offset)); // Update existing
+                // Search for existing entry
+                for _ in 0..128 {
+                    if let Some((slot_hash, offset, _)) = self.index[idx].unpack() {
+                        if slot_hash == hash {
+                            let acc = self.read_account(offset as usize);
+                            if &acc.pubkey == *pk {
+                                return (hash, idx, Some(offset)); // Update existing
+                            }
                         }
+                    } else {
+                        return (hash, idx, None); // Insert new at this slot
                     }
-                } else {
-                    return (hash, idx, None); // Insert new at this slot
+                    idx = (idx + 1) % INDEX_SIZE;
                 }
-                idx = (idx + 1) % INDEX_SIZE;
-            }
-            (hash, idx, None) // Insert new (fallback)
-        }).collect();
+                (hash, idx, None) // Insert new (fallback)
+            })
+            .collect();
 
         // Phase 2: Allocate offsets for new accounts (single atomic batch)
-        let insert_count = classifications.iter().filter(|(_, _, off)| off.is_none()).count();
+        let insert_count = classifications
+            .iter()
+            .filter(|(_, _, off)| off.is_none())
+            .count();
         let base_offset = if insert_count > 0 {
-            let offset = self.account_count.fetch_add(insert_count as u32, Ordering::Relaxed);
+            let offset = self
+                .account_count
+                .fetch_add(insert_count as u32, Ordering::Relaxed);
             if offset + (insert_count as u32) > ACCOUNTS_PER_SHARD as u32 {
                 return Err("Shard full".to_string());
             }
@@ -293,51 +313,66 @@ impl Shard {
 
         // Phase 3: Compute offsets for each update (sequential to assign indices)
         let mut insert_offset_counter = base_offset;
-        let offsets: Vec<u32> = classifications.iter().map(|(_, _, existing_offset)| {
-            if let Some(off) = existing_offset {
-                *off
-            } else {
-                let off = insert_offset_counter;
-                insert_offset_counter += 1;
-                off
-            }
-        }).collect();
+        let offsets: Vec<u32> = classifications
+            .iter()
+            .map(|(_, _, existing_offset)| {
+                if let Some(off) = existing_offset {
+                    *off
+                } else {
+                    let off = insert_offset_counter;
+                    insert_offset_counter += 1;
+                    off
+                }
+            })
+            .collect();
 
         // Phase 4: Parallel mmap writes
-        updates.par_iter().zip(offsets.par_iter()).for_each(|((_, acc), offset)| {
-            self.write_account(*offset as usize, acc);
-        });
+        updates
+            .par_iter()
+            .zip(offsets.par_iter())
+            .for_each(|((_, acc), offset)| {
+                self.write_account(*offset as usize, acc);
+            });
 
         // Phase 5: Parallel index updates with CAS (only for new entries)
-        classifications.par_iter().zip(offsets.par_iter()).for_each(|((hash, start_idx, existing_offset), offset)| {
-            if existing_offset.is_some() {
-                return; // Already in index, mmap write is enough
-            }
-
-            // New entry - find slot and CAS it in
-            let mut idx = *start_idx;
-            let mut distance = 0u8;
-
-            loop {
-                let slot = &self.index[idx];
-                let packed = AtomicSlot::pack(*hash, *offset, distance);
-
-                if slot.data.compare_exchange(
-                    AtomicSlot::EMPTY,
-                    packed,
-                    Ordering::Release,
-                    Ordering::Acquire
-                ).is_ok() {
-                    break;
+        classifications.par_iter().zip(offsets.par_iter()).for_each(
+            |((hash, start_idx, existing_offset), offset)| {
+                if existing_offset.is_some() {
+                    return; // Already in index, mmap write is enough
                 }
 
-                idx = (idx + 1) % INDEX_SIZE;
-                distance += 1;
-                if distance > 127 { break; }
-            }
-        });
+                // New entry - find slot and CAS it in
+                let mut idx = *start_idx;
+                let mut distance = 0u8;
 
-        self.write_count.fetch_add(updates.len() as u64, Ordering::Relaxed);
+                loop {
+                    let slot = &self.index[idx];
+                    let packed = AtomicSlot::pack(*hash, *offset, distance);
+
+                    if slot
+                        .data
+                        .compare_exchange(
+                            AtomicSlot::EMPTY,
+                            packed,
+                            Ordering::Release,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        break;
+                    }
+
+                    idx = (idx + 1) % INDEX_SIZE;
+                    distance += 1;
+                    if distance > 127 {
+                        break;
+                    }
+                }
+            },
+        );
+
+        self.write_count
+            .fetch_add(updates.len() as u64, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -349,12 +384,16 @@ pub struct GeometricLedger {
 impl GeometricLedger {
     pub fn new(data_dir: impl AsRef<Path>) -> Result<Self, String> {
         let data_dir = data_dir.as_ref();
-        let shards: Result<Vec<_>, _> = (0..SHARD_COUNT).into_par_iter().map(|i| {
-            Shard::open(data_dir, i)
-        }).collect();
-        
+        let shards: Result<Vec<_>, _> = (0..SHARD_COUNT)
+            .into_par_iter()
+            .map(|i| Shard::open(data_dir, i))
+            .collect();
+
         let shards = shards?;
-        let total: u32 = shards.iter().map(|s| s.account_count.load(Ordering::Relaxed)).sum();
+        let total: u32 = shards
+            .iter()
+            .map(|s| s.account_count.load(Ordering::Relaxed))
+            .sum();
         println!("✅ Geometric Ledger loaded: {} accounts active.", total);
 
         Ok(Self { shards })
@@ -363,7 +402,7 @@ impl GeometricLedger {
     pub fn update_batch(&self, updates: &[([u8; 32], Account)]) -> Result<(), String> {
         let mut buckets: Vec<Vec<_>> = (0..SHARD_COUNT).map(|_| Vec::new()).collect();
         for (pk, acc) in updates {
-            buckets[pk[0] as usize].push((pk, acc));
+            buckets[pk[0] as usize % SHARD_COUNT].push((pk, acc));
         }
 
         // Use batch insert for each shard (parallel across shards)
@@ -376,12 +415,13 @@ impl GeometricLedger {
     }
 
     pub fn get(&self, pubkey: &[u8; 32]) -> Option<Account> {
-        self.shards[pubkey[0] as usize].get(pubkey)
+        self.shards[pubkey[0] as usize % SHARD_COUNT].get(pubkey)
     }
-    
+
     pub fn mint(&self, pubkey: [u8; 32], amount: u64) {
         let mut acc = self.get(&pubkey).unwrap_or_else(|| Account {
-            pubkey, ..Default::default()
+            pubkey,
+            ..Default::default()
         });
         acc.balance = acc.balance.saturating_add(amount);
         let _ = self.update_batch(&[(pubkey, acc)]);
@@ -390,11 +430,19 @@ impl GeometricLedger {
     pub fn snapshot(&self) -> Result<(), String> {
         self.shards.par_iter().try_for_each(|s| s.flush())
     }
-    
+
     pub fn stats(&self) -> LedgerStats {
-        let total_accounts = self.shards.iter().map(|s| s.account_count.load(Ordering::Relaxed)).sum();
-        let total_writes = self.shards.iter().map(|s| s.write_count.load(Ordering::Relaxed)).sum();
-        
+        let total_accounts = self
+            .shards
+            .iter()
+            .map(|s| s.account_count.load(Ordering::Relaxed))
+            .sum();
+        let total_writes = self
+            .shards
+            .iter()
+            .map(|s| s.write_count.load(Ordering::Relaxed))
+            .sum();
+
         LedgerStats {
             total_accounts,
             total_writes,
