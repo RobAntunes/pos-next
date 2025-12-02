@@ -15,7 +15,7 @@ use futures::stream::StreamExt;
 use libp2p::{
     mdns, noise,
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Multiaddr, PeerId, SwarmBuilder, Transport,
+    tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
 };
 use quinn::{ClientConfig, Endpoint, ServerConfig};
 
@@ -126,15 +126,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pre-mint tokens for test accounts (always)
     // We mint for 1M accounts to match the client's load test range
     // CRITICAL: This must happen BEFORE starting the network to avoid race conditions
-    info!("💰 Pre-minting balances for 1,000,000 accounts (this may take a moment)...");
+    info!("💰 Pre-minting balances for 1,000,000 accounts (batched)...");
+
+    // Batch updates to avoid 1M separate Rayon calls and disk flushes
+    const BATCH_SIZE: usize = 10_000;
+    let mut batch = Vec::with_capacity(BATCH_SIZE);
+
     for i in 0..1_000_000u64 {
         let sender_seed = i.to_le_bytes();
         let secret_hash = blake3::hash(&sender_seed);
         let secret = *secret_hash.as_bytes();
         let sender_hash = blake3::hash(&secret);
         let sender_addr = *sender_hash.as_bytes();
-        // Mint enough for many transactions
-        ledger.mint(sender_addr, 1_000_000_000);
+
+        // Create account with balance
+        let acc = pos::Account {
+            pubkey: sender_addr,
+            balance: 1_000_000_000,
+            ..Default::default()
+        };
+
+        batch.push((sender_addr, acc));
+
+        if batch.len() >= BATCH_SIZE {
+            ledger
+                .update_batch(&batch)
+                .expect("Failed to pre-mint batch");
+            batch.clear();
+        }
+    }
+    // Flush remaining
+    if !batch.is_empty() {
+        ledger
+            .update_batch(&batch)
+            .expect("Failed to pre-mint final batch");
     }
     info!("✅ Pre-minting complete!");
 
@@ -148,8 +173,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Initialize Arena Mempool
-    let arena = Arc::new(ArenaMempool::new());
-    let arena_capacity = pos::ARENA_MAX_WORKERS * 16 * pos::ZONE_SIZE;
+    // Reduced to 256MB to prevent OOM on Mac during heavy load
+    let arena = Arc::new(ArenaMempool::new(
+        256 * 1024 * 1024, // 256MB capacity
+        100_000,           // 100k batches
+    ));
+    let arena_capacity = 256 * 1024 * 1024; // Update arena_capacity to reflect the new explicit size
     info!(
         "📦 Arena mempool initialized ({} zones, {}M capacity, partitioned)",
         pos::ARENA_MAX_WORKERS * 16,
@@ -281,7 +310,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             _ = tokio::time::sleep(Duration::from_secs(5)) => {
                 let sequenced = total_processed.load(Ordering::Relaxed);
-                let applied = total_applied.load(Ordering::Relaxed);
+                let _applied = total_applied.load(Ordering::Relaxed);
                 let stats = arena.stats();
                 let applied = total_applied.load(Ordering::Relaxed);
                 let rejected = total_rejected.load(Ordering::Relaxed);
@@ -314,7 +343,8 @@ fn start_shard_workers(
     let mut senders = Vec::new();
 
     for i in 0..num_shards {
-        let (tx, rx) = std::sync::mpsc::sync_channel(10_000);
+        // Reduced channel size to prevent memory pressure
+        let (tx, rx) = std::sync::mpsc::sync_channel(1_000);
         senders.push(tx);
         let ledger_clone = ledger.clone();
         let total_clone = total_applied.clone();
@@ -399,8 +429,8 @@ async fn handle_quic_connections(
     endpoint: Endpoint,
     arena: Arc<ArenaMempool>, // Changed from Mempool
     total_received: Arc<AtomicU64>,
-    node_id: [u8; 32],
-    listen_port: u16,
+    _node_id: [u8; 32],
+    _listen_port: u16,
     num_active_workers: usize,
 ) {
     let next_worker = Arc::new(AtomicUsize::new(0));
@@ -569,12 +599,12 @@ impl rustls::client::ServerCertVerifier for NoCertificateVerification {
 async fn producer_loop(
     arena: Arc<ArenaMempool>,
     target_tps: u64,
-    sender_id: [u8; 32],
+    _sender_id: [u8; 32],
     smart_gen: bool,
     worker_id: usize,
 ) {
-    use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    // use rand::rngs::StdRng;
+    // use rand::{Rng, SeedableRng};
     use std::time::Instant;
 
     let mut nonce: u64 = (worker_id as u64) * 100_000_000;
@@ -715,7 +745,7 @@ fn consumer_loop_blocking(
         // Pull from partition
         if let Some(txs) = arena.pull_batch_partitioned(worker_id) {
             if !txs.is_empty() {
-                let batch_start = Instant::now();
+                let _batch_start = Instant::now();
                 let (accepted, rejected) = sequencer.process_batch(txs);
 
                 if let Some(batch) = sequencer.finalize_batch() {
