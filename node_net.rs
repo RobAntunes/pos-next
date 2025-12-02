@@ -700,7 +700,24 @@ fn consumer_loop_blocking(
                 let (accepted, rejected) = sequencer.process_batch(txs);
 
                 if let Some(batch) = sequencer.finalize_batch() {
-                    // batch_sender usage removed (Decoupled architecture)
+                    let batch = Arc::new(batch);
+                    let total_txs = batch.transactions.len();
+                    let num_shards = shard_senders.len();
+                    let chunk_size = (total_txs + num_shards - 1) / num_shards;
+
+                    for (i, sender) in shard_senders.iter().enumerate() {
+                        let start = i * chunk_size;
+                        if start >= total_txs {
+                            break;
+                        }
+                        let count = std::cmp::min(chunk_size, total_txs - start);
+                        let work = ShardWork {
+                            batch: batch.clone(),
+                            start,
+                            count,
+                        };
+                        let _ = sender.send(work);
+                    }
                     batches_since_report += 1;
                 }
 
