@@ -96,8 +96,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn0 = endpoint.connect(addr0, "localhost")?.await?;
     let conn1 = endpoint.connect(addr1, "localhost")?.await?;
 
-    println!("✅ Connected to Shard 0: {}", addr0);
-    println!("✅ Connected to Shard 1: {}", addr1);
+    // Derive node positions from their names (same algorithm as server)
+    // Server uses: generate_node_id("node-{port}") then hash and calculate_ring_position
+    let node0_name = format!("node-{}", addr0.port());
+    let node1_name = format!("node-{}", addr1.port());
+    let node0_id = blake3::hash(node0_name.as_bytes());
+    let node1_id = blake3::hash(node1_name.as_bytes());
+    let node0_pos = calculate_ring_position(&blake3::hash(node0_id.as_bytes()));
+    let node1_pos = calculate_ring_position(&blake3::hash(node1_id.as_bytes()));
+
+    println!("✅ Connected to Shard 0: {} (pos: 0x{:016x})", addr0, node0_pos);
+    println!("✅ Connected to Shard 1: {} (pos: 0x{:016x})", addr1, node1_pos);
     println!();
 
     // Optional coordinated start (for multi-host runs)
@@ -226,6 +235,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let tps_limit = args.tps / num_threads as u64;
 
+        let node0_pos = node0_pos;
+        let node1_pos = node1_pos;
+        
         handles.push(tokio::spawn(async move {
             let batch_size = args.batch_size;
             let mut batch_0 = Vec::with_capacity(batch_size);
@@ -259,12 +271,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
 
                 let tx_pos = calculate_ring_position(&tx.hash());
-                let midpoint = u64::MAX / 2;
+
+                // Calculate ring distance to each node (clockwise)
+                let dist_to_0 = if tx_pos >= node0_pos {
+                    tx_pos - node0_pos
+                } else {
+                    (u64::MAX - node0_pos) + tx_pos + 1
+                };
+                let dist_to_1 = if tx_pos >= node1_pos {
+                    tx_pos - node1_pos
+                } else {
+                    (u64::MAX - node1_pos) + tx_pos + 1
+                };
 
                 if dumb_mode {
                     batch_0.push(tx);
                     sent_0.fetch_add(1, Ordering::Relaxed);
-                } else if tx_pos < midpoint {
+                } else if dist_to_0 <= dist_to_1 {
+                    // Route to closer node
                     batch_0.push(tx);
                     sent_0.fetch_add(1, Ordering::Relaxed);
                 } else {

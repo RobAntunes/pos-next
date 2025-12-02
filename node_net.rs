@@ -292,11 +292,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Initialize sequencer config template
+    // IMPORTANT: node_position is derived from node_id for unique geometric positioning
+    let node_id = generate_node_id(&node_name);
+    let node_position = pos::calculate_ring_position(&blake3::hash(&node_id));
     let mut sequencer_config = SequencerConfig {
-        sequencer_id: generate_node_id(&node_name),
+        sequencer_id: node_id,
         batch_size: args.batch_size,
+        node_position,
         ..Default::default()
     };
+    
+    info!(
+        "🎯 Node geometric position: {} (0x{:016x})",
+        node_name,
+        node_position
+    );
 
     // BENCHMARK MODE: If producer is enabled, accept ALL transactions
     if args.producer {
