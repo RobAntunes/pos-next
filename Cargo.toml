@@ -28,12 +28,20 @@ name = "client"
 path = "client.rs"
 
 [dependencies]
-blake3 = "1.5"
+blake3 = { version = "1.5", features = ["pure"] }
 rayon = "1.10"
 mimalloc = "0.1"
 quinn = "0.10"
 rustls = { version = "0.21", features = ["quic", "dangerous_configuration"] }
-libp2p = { version = "0.53", features = ["kad", "tcp", "tokio", "macros", "noise", "yamux", "mdns"] }
+libp2p = { version = "0.53", features = [
+    "kad",
+    "tcp",
+    "tokio",
+    "macros",
+    "noise",
+    "yamux",
+    "mdns",
+] }
 clap = { version = "4.4", features = ["derive"] }
 bytes = "1.5"
 tokio-util = { version = "0.7", features = ["codec"] }
@@ -44,7 +52,13 @@ curve25519-dalek = { version = "4.1", features = ["digest"] }
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 parking_lot = "0.12"
 dashmap = "5.5"
-tokio = { version = "1.35", features = ["full", "rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1.35", features = [
+    "full",
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "sync",
+] }
 uuid = { version = "1.6", features = ["v4"] }
 rand = "0.8"
 tracing = "0.1"

@@ -4,10 +4,10 @@
 //! Usage: cargo run --release
 
 // Use mimalloc for concurrent allocation (breaks the allocator lock bottleneck)
-// use mimalloc::MiMalloc;
+use mimalloc::MiMalloc;
 
-// #[global_allocator]
-// static GLOBAL: MiMalloc = MiMalloc;
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
