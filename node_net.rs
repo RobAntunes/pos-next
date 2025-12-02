@@ -66,8 +66,8 @@ struct Args {
     #[arg(long, default_value_t = false)]
     smart_gen: bool,
 
-    /// Maximum mempool size (default: 10M transactions)
-    #[arg(long, default_value_t = 10_000_000)]
+    /// Maximum mempool size (default: 1M transactions)
+    #[arg(long, default_value_t = 1_000_000)]
     mempool_size: usize,
 
     /// Manual peer list (e.g., --peer 192.168.1.5:9000)
