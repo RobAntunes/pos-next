@@ -123,6 +123,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
+    // Pre-mint tokens for test accounts (always)
+    // We mint for 1M accounts to match the client's load test range
+    // CRITICAL: This must happen BEFORE starting the network to avoid race conditions
+    info!("💰 Pre-minting balances for 1,000,000 accounts (this may take a moment)...");
+    for i in 0..1_000_000u64 {
+        let sender_seed = i.to_le_bytes();
+        let secret_hash = blake3::hash(&sender_seed);
+        let secret = *secret_hash.as_bytes();
+        let sender_hash = blake3::hash(&secret);
+        let sender_addr = *sender_hash.as_bytes();
+        // Mint enough for many transactions
+        ledger.mint(sender_addr, 1_000_000_000);
+    }
+    info!("✅ Pre-minting complete!");
+
     // Threading Model
     let total_cores = num_cpus::get();
     let num_pairs = (total_cores / 2).max(1).min(pos::ARENA_MAX_WORKERS);
@@ -209,16 +224,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("✅ {} Consumer threads started", num_pairs);
 
+    info!("✅ {} Consumer threads started", num_pairs);
+
     // Spawn Producers
     if args.producer {
-        for i in 0..10000u64 {
-            let sender_seed = i.to_le_bytes();
-            let sender_hash = blake3::hash(&sender_seed);
-            let sender_addr = *sender_hash.as_bytes();
-            ledger.mint(sender_addr, u64::MAX / 10000);
-        }
-        info!("💰 Pre-minted balance for 10K senders");
-
         let tps_per_producer = args.tps / num_pairs as u64;
 
         for i in 0..num_pairs {
@@ -700,7 +709,24 @@ fn consumer_loop_blocking(
                 let (accepted, rejected) = sequencer.process_batch(txs);
 
                 if let Some(batch) = sequencer.finalize_batch() {
-                    // batch_sender usage removed (Decoupled architecture)
+                    let batch = Arc::new(batch);
+                    let total_txs = batch.transactions.len();
+                    let num_shards = shard_senders.len();
+                    let chunk_size = (total_txs + num_shards - 1) / num_shards;
+
+                    for (i, sender) in shard_senders.iter().enumerate() {
+                        let start = i * chunk_size;
+                        if start >= total_txs {
+                            break;
+                        }
+                        let count = std::cmp::min(chunk_size, total_txs - start);
+                        let work = ShardWork {
+                            batch: batch.clone(),
+                            start,
+                            count,
+                        };
+                        let _ = sender.send(work);
+                    }
                     batches_since_report += 1;
                 }
 
@@ -754,6 +780,11 @@ fn shard_worker_loop(
         // Zero-Copy: Access the slice of the shared batch
         let txs = &work.batch.transactions[work.start..work.start + work.count];
 
+        // DEBUG LOGGING
+        if shard_id == 0 {
+            // tracing::info!("Worker #{} received batch chunk of {} txs", shard_id, txs.len());
+        }
+
         for ptx in txs {
             if let pos::TransactionPayload::Transfer {
                 recipient, amount, ..
@@ -767,6 +798,12 @@ fn shard_worker_loop(
                         ..Default::default()
                     })
                 });
+
+                // DEBUG: Check balance for first few txs
+                // if count < 5 && shard_id == 0 {
+                //    tracing::info!("Checking balance for sender {:?}: {} >= {}", &sender[0..4], s_acc.balance, amount);
+                // }
+
                 if s_acc.balance >= amount {
                     s_acc.balance -= amount;
                     cache.insert(sender, s_acc);
@@ -780,6 +817,12 @@ fn shard_worker_loop(
                     cache.insert(recipient, r_acc);
                     count += 1;
                 } else {
+                    tracing::warn!(
+                        "Insufficient balance for sender {:?}: {} < {}",
+                        &sender[0..4],
+                        s_acc.balance,
+                        amount
+                    );
                     cache.insert(sender, s_acc); // Return to cache
                 }
             }
@@ -788,6 +831,11 @@ fn shard_worker_loop(
             let updates: Vec<_> = cache.into_iter().collect();
             let _ = ledger.update_batch(&updates);
             total.fetch_add(count, Ordering::Relaxed);
+            // if shard_id == 0 {
+            //    tracing::info!("Worker #{} applied {}/{} txs", shard_id, count, txs.len());
+            // }
+        } else {
+            // tracing::warn!("Worker #{} applied 0 txs (cache empty)", shard_id);
         }
     }
 }
