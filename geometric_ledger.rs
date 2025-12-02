@@ -30,6 +30,9 @@ impl Default for Account {
 }
 
 const ACCOUNT_SIZE: usize = 128;
+// Removed constants to support dynamic configuration
+// const SHARD_COUNT: usize = 16;
+// const ACCOUNTS_PER_SHARD: usize = 2_000_000;
 
 // Atomic index slot
 // OPTIMIZATION: align(64) for cache line alignment - prevents false sharing between adjacent slots
@@ -77,19 +80,22 @@ impl AtomicSlot {
     }
 }
 
+// Index size is dynamic based on accounts_per_shard
+// const INDEX_SIZE: usize = ACCOUNTS_PER_SHARD * 2;
 struct Shard {
     mmap: MmapMut,
     index: Box<[AtomicSlot]>,
     account_count: AtomicU32,
     write_count: AtomicU64,
-    index_size: usize,
     accounts_per_shard: usize,
+    index_size: usize,
 }
 
 impl Shard {
     fn open(data_dir: &Path, shard_id: usize, accounts_per_shard: usize) -> Result<Self, String> {
         let path = data_dir.join(format!("shard_{:03}.bin", shard_id));
         let size = (accounts_per_shard * ACCOUNT_SIZE) as u64;
+        let index_size = accounts_per_shard * 2;
 
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -114,7 +120,7 @@ impl Shard {
                 .map_err(|e| format!("Failed to mmap: {}", e))?
         };
 
-        let index_size = accounts_per_shard * 2;
+
         let mut index_vec = Vec::with_capacity(index_size);
         for _ in 0..index_size {
             index_vec.push(AtomicSlot::new());
@@ -126,8 +132,8 @@ impl Shard {
             index,
             account_count: AtomicU32::new(0),
             write_count: AtomicU64::new(0),
-            index_size,
             accounts_per_shard,
+            index_size,
         };
 
         shard.rebuild_index()?;
@@ -382,12 +388,16 @@ impl Shard {
 
 pub struct GeometricLedger {
     shards: Vec<Shard>,
-    shard_count: usize,
-    accounts_per_shard: usize,
+    pub shard_count: usize,
+    pub accounts_per_shard: usize,
 }
 
 impl GeometricLedger {
-    pub fn new(data_dir: impl AsRef<Path>, shard_count: usize, accounts_per_shard: usize) -> Result<Self, String> {
+    pub fn new(
+        data_dir: impl AsRef<Path>,
+        shard_count: usize,
+        accounts_per_shard: usize,
+    ) -> Result<Self, String> {
         let data_dir = data_dir.as_ref();
         let shards: Result<Vec<_>, _> = (0..shard_count)
             .into_par_iter()
@@ -401,6 +411,7 @@ impl GeometricLedger {
             .sum();
         println!("✅ Geometric Ledger loaded: {} accounts active.", total);
         println!("ℹ️  ACCOUNTS_PER_SHARD: {}", accounts_per_shard);
+        println!("ℹ️  SHARD_COUNT: {}", shard_count);
 
         // Log per-shard usage to debug "Shard full" issues
         for (i, shard) in shards.iter().enumerate() {
@@ -416,7 +427,11 @@ impl GeometricLedger {
             }
         }
 
-        Ok(Self { shards, shard_count, accounts_per_shard })
+        Ok(Self {
+            shards,
+            shard_count,
+            accounts_per_shard,
+        })
     }
 
     pub fn update_batch(&self, updates: &[([u8; 32], Account)]) -> Result<(), String> {

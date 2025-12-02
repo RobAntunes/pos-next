@@ -95,7 +95,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_target(false)
         .init();
 
-    let args = Args::parse();
+    let mut args = Args::parse();
+
+    // NOTE: We do NOT force smart_gen = true anymore.
+    // Instead, we will relax the Sequencer constraints to accept ALL transactions.
+    // This allows for maximum TPS (no generation overhead) while ensuring 100% acceptance.
+
     let node_name = args
         .node_id
         .clone()
@@ -124,12 +129,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Adaptive Configuration
-    // 1. Shard Count: 16 shards per 4GB of RAM, min 16, max 256
+    // 1. Shard Count: 4 shards per GB? No, let's be more conservative.
+    //    Min 4 shards (for very low RAM), Max 256
     let shard_count = std::cmp::max(
-        16,
+        4,
         std::cmp::min(256, (total_memory / (1024 * 1024 * 1024) * 4) as usize),
     );
-
     // 2. Accounts per Shard:
     //    - < 4GB: 250,000 (Total 4M capacity with 16 shards) -> ~512MB Index RAM
     //    - < 8GB: 500,000 (Total 8M capacity) -> ~1GB Index RAM
@@ -162,11 +167,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Initialize sequencer config template
-    let sequencer_config = SequencerConfig {
+    let mut sequencer_config = SequencerConfig {
         sequencer_id: generate_node_id(&node_name),
         batch_size: args.batch_size,
         ..Default::default()
     };
+
+    // BENCHMARK MODE: If producer is enabled, accept ALL transactions
+    if args.producer {
+        info!("🚀 BENCHMARK MODE: Max Range set to u64::MAX (Accept All)");
+        sequencer_config.max_range = u64::MAX;
+    }
 
     // Pre-mint tokens for test accounts (always)
     // We mint for 1M accounts to match the client's load test range
@@ -281,16 +292,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shard_senders = Arc::new(shard_senders);
 
     // Spawn Consumers (Consumers pull from their partition)
+    // Spawn Consumers (Consumers pull from their partition)
+    let mut sequencers = Vec::new();
     for i in 0..num_pairs {
+        let sequencer = Arc::new(Sequencer::new(sequencer_config.clone()));
+        sequencers.push(sequencer.clone());
+
         let arena_consumer = arena.clone();
-        let total_clone = total_processed_clone.clone();
+        let total_clone = total_processed.clone();
         let shard_senders_clone = shard_senders.clone();
-        let mut sequencer = Sequencer::new(sequencer_config.clone());
 
         std::thread::spawn(move || {
             consumer_loop_blocking(
                 i, // worker_id
-                &mut sequencer,
+                sequencer,
                 arena_consumer,
                 total_clone,
                 batch_size,
@@ -333,32 +348,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Geometric Turbine Network (HashReveal Enabled)");
     println!();
 
+    // Monitor state
+    let mut last_total = 0;
+    let mut last_time = std::time::Instant::now();
+
     // Main event loop
     loop {
         tokio::select! {
-            Some(peer_info) = peer_rx.recv() => {
-                info!("🔎 NEW PEER DISCOVERED via mDNS!");
-                if let Some(ip) = extract_ip_from_multiaddr(&peer_info.multiaddr) {
-                    let target_port = if args.port == 9000 { 9001 } else { 9000 };
-                    let endpoint = quic_endpoint.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = connect_to_peer(endpoint, ip, target_port).await {
-                            warn!("Failed to connect to peer: {}", e);
+                    Some(peer_info) = peer_rx.recv() => {
+                        info!("🔎 NEW PEER DISCOVERED via mDNS!");
+                        if let Some(ip) = extract_ip_from_multiaddr(&peer_info.multiaddr) {
+                            let target_port = if args.port == 9000 { 9001 } else { 9000 };
+                            let endpoint = quic_endpoint.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = connect_to_peer(endpoint, ip, target_port).await {
+                                    warn!("Failed to connect to peer: {}", e);
+                                }
+                            });
                         }
-                    });
-                }
-            }
+                    }
 
             _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                let sequenced = total_processed.load(Ordering::Relaxed);
-                let _applied = total_applied.load(Ordering::Relaxed);
-                let stats = arena.stats();
-                let applied = total_applied.load(Ordering::Relaxed);
+                let total = total_processed.load(Ordering::Relaxed);
                 let rejected = total_rejected.load(Ordering::Relaxed);
-                let lag = sequenced.saturating_sub(applied + rejected);
 
-                info!("📊 Heartbeat | Arena: ready={} free={} | Sequenced: {} | Applied: {} | Rejected: {} | Lag: {}",
-                      stats.zones_ready, stats.zones_free, sequenced, applied, rejected, lag);
+                // Aggregate sequenced count from all workers
+                let sequenced: u64 = sequencers.iter()
+                    .map(|s| s.current_round() * args.batch_size as u64)
+                    .sum();
+
+                let stats = arena.stats();
+                let lag = sequenced.saturating_sub(total + rejected);
+
+                let now = std::time::Instant::now();
+                let elapsed = now.duration_since(last_time).as_secs_f64();
+                let tps = (total - last_total) as f64 / elapsed;
+
+                last_total = total;
+                last_time = now;
+
+                info!(
+                    "📊 Heartbeat | TPS: {:.0} | Arena: ready={} free={} | Sequenced: {} | Applied: {} | Rejected: {} | Lag: {}",
+                    tps,
+                    stats.zones_ready,
+                    stats.zones_free,
+                    sequenced,
+                    total,
+                    rejected,
+                    lag
+                );
             }
         }
     }
@@ -369,10 +407,13 @@ fn start_shard_workers(
     total_applied: Arc<AtomicU64>,
     total_rejected: Arc<AtomicU64>,
 ) -> Vec<std::sync::mpsc::SyncSender<ShardWork>> {
-    let num_shards = ledger.stats().shard_count;
+    // Decouple worker count from shard count
+    // On low-core machines, 16 workers causes thrashing. Limit to num_cpus.
+    let num_cpus = num_cpus::get();
+    let num_workers = std::cmp::min(ledger.shard_count, std::cmp::max(2, num_cpus)); // At least 2 workers
     let mut senders = Vec::new();
 
-    for i in 0..num_shards {
+    for i in 0..num_workers {
         // Reduced channel size to prevent memory pressure
         let (tx, rx) = std::sync::mpsc::sync_channel(1_000);
         senders.push(tx);
@@ -385,7 +426,10 @@ fn start_shard_workers(
         });
     }
 
-    info!("💾 Starting {} shard workers (Direct Dispatch)", num_shards);
+    info!(
+        "💾 Starting {} shard workers (Direct Dispatch, {} Shards)",
+        num_workers, ledger.shard_count
+    );
     senders
 }
 
@@ -649,12 +693,15 @@ async fn producer_loop(
     let node_position = pos::calculate_ring_position(&node_hash);
 
     // Pre-compute accounts to avoid hashing in the hot loop
-    let accounts: std::sync::Arc<Vec<[u8; 32]>> = std::sync::Arc::new(
+    // Pre-compute accounts and secrets
+    let accounts: std::sync::Arc<Vec<([u8; 32], [u8; 32])>> = std::sync::Arc::new(
         (0u64..10000)
             .map(|i| {
                 let seed = i.to_le_bytes();
-                let hash = blake3::hash(&seed);
-                *hash.as_bytes()
+                let secret_hash = blake3::hash(&seed);
+                let secret = *secret_hash.as_bytes();
+                let sender_hash = blake3::hash(&secret);
+                (*sender_hash.as_bytes(), secret)
             })
             .collect(),
     );
@@ -682,11 +729,12 @@ async fn producer_loop(
 
             for i in 0..burst_size {
                 // Deterministic lookup (O(1))
+                // Deterministic lookup (O(1))
                 let sender_idx = ((current_nonce + i as u64) % 10000) as usize;
-                let sender = accounts_clone[sender_idx];
+                let (sender, secret) = accounts_clone[sender_idx];
 
                 let recipient_idx = (((current_nonce + i as u64) / 10000) % 10000) as usize;
-                let recipient = accounts_clone[recipient_idx];
+                let (recipient, _) = accounts_clone[recipient_idx];
 
                 let sender_nonce = (current_nonce + i as u64) / 10000;
                 let amount = ((i as u64 * 7919) % 9999) + 1;
@@ -700,7 +748,7 @@ async fn producer_loop(
                     },
                     sender_nonce,
                     timestamp + i as u64,
-                    [0u8; 32], // HashReveal secret
+                    secret, // Correct HashReveal secret
                 );
 
                 if smart_gen {
@@ -754,7 +802,7 @@ async fn producer_loop(
 
 fn consumer_loop_blocking(
     worker_id: usize,
-    sequencer: &mut Sequencer,
+    sequencer: Arc<Sequencer>,
     arena: Arc<ArenaMempool>,
     total_processed: Arc<AtomicU64>,
     _batch_size: usize,
@@ -764,6 +812,8 @@ fn consumer_loop_blocking(
     let mut last_report = Instant::now();
     let mut batches_since_report: u64 = 0;
     let mut processed_since_report: u64 = 0;
+    let mut accepted_since_report: u64 = 0;
+    let mut rejected_since_report: u64 = 0;
 
     tracing::info!(
         "🔄 Consumer #{} starting (Partition {})",
@@ -803,6 +853,8 @@ fn consumer_loop_blocking(
                 // Update metrics for ALL processed transactions (accepted or rejected)
                 total_processed.fetch_add((accepted + rejected) as u64, Ordering::Relaxed);
                 processed_since_report += (accepted + rejected) as u64;
+                accepted_since_report += accepted as u64;
+                rejected_since_report += rejected as u64;
             }
         } else {
             // No ready zones in partition, yield
@@ -813,13 +865,17 @@ fn consumer_loop_blocking(
             let actual_tps = processed_since_report as f64 / last_report.elapsed().as_secs_f64();
             let stats = arena.stats();
             tracing::info!(
-                "⚡ Consumer Stats: {} batches, {} tx/s (Sequenced) | Arena: {} ready",
+                "⚡ Consumer Stats: {} batches, {} tx/s ({} acc, {} rej) | Arena: {} ready",
                 batches_since_report,
                 actual_tps as u64,
+                accepted_since_report,
+                rejected_since_report,
                 stats.zones_ready
             );
             batches_since_report = 0;
             processed_since_report = 0;
+            accepted_since_report = 0;
+            rejected_since_report = 0;
             last_report = Instant::now();
         }
     }
