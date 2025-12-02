@@ -28,7 +28,7 @@ name = "client"
 path = "client.rs"
 
 [dependencies]
-blake3 = { version = "1.5", features = ["pure"] }
+blake3 = "1.5"
 rayon = "1.10"
 mimalloc = "0.1"
 quinn = "0.10"
