@@ -1,0 +1,165 @@
+╔═══════════════════════════════════════════════════════════════╗
+║           POS Protocol - Networked Node                       ║
+╠═══════════════════════════════════════════════════════════════╣
+║  L0 (Discovery): mDNS-based peer discovery                    ║
+║  L2 (Transport): QUIC high-speed data plane                   ║
+╚═══════════════════════════════════════════════════════════════╝
+
+🚀 Starting bob on QUIC port 9001
+
+✅ Geometric Ledger loaded: 0 accounts active.
+[2m2025-12-02T01:46:35.144945Z[0m [32m INFO[0m 📦 Arena mempool initialized (64 zones, 0M capacity, partitioned)
+[2m2025-12-02T01:46:35.189809Z[0m [32m INFO[0m ✅ L2 (QUIC) listening on 0.0.0.0:9001
+[2m2025-12-02T01:46:35.189944Z[0m [32m INFO[0m ✅ L0 (mDNS) discovery service started
+[2m2025-12-02T01:46:35.189990Z[0m [32m INFO[0m ⚙️ Threading Model: 2 Producer/Consumer pairs (using 4 cores)
+[2m2025-12-02T01:46:35.190719Z[0m [32m INFO[0m 💾 Starting 4 shard workers (Direct Dispatch)
+[2m2025-12-02T01:46:35.192079Z[0m [32m INFO[0m ✅ 2 Consumer threads started
+
+🌐 Starting Geometric Turbine Network Test...
+🚀 VERSION: HASH_REVEAL_DEBUG_v2 (Manual Peering + Logging)
+
+[2m2025-12-02T01:46:35.195118Z[0m [32m INFO[0m 🔄 Consumer #0 starting (Partition 0)
+[2m2025-12-02T01:46:35.195343Z[0m [32m INFO[0m 🔄 Consumer #1 starting (Partition 1)
+[2m2025-12-02T01:46:35.222871Z[0m [32m INFO[0m [3mlocal_peer_id[0m[2m=[0m12D3KooWLKVWfo42NHEButApsNqrzR5C3VjJ88zcyGPtGVj3sKmB
+[2m2025-12-02T01:46:35.228087Z[0m [32m INFO[0m 📡 L0 Discovery service started (advertising QUIC port 9001)
+[2m2025-12-02T01:46:35.268302Z[0m [32m INFO[0m creating instance on iface address [3maddress[0m[2m=[0m10.88.111.23
+[2m2025-12-02T01:46:35.281454Z[0m [32m INFO[0m discovered peer on address [3mpeer[0m[2m=[0m12D3KooWFqXcgiiHU2NVPc8eVdV1tDJz5qSQDqoK6jBCFJ2n16ot [3maddress[0m[2m=[0m/ip4/10.88.111.23/tcp/56577/p2p/12D3KooWFqXcgiiHU2NVPc8eVdV1tDJz5qSQDqoK6jBCFJ2n16ot
+[2m2025-12-02T01:46:35.282723Z[0m [32m INFO[0m 🔎 NEW PEER DISCOVERED via mDNS!
+[2m2025-12-02T01:46:40.195419Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:46:40.283803Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:46:45.195617Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:46:45.290683Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:46:50.196302Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:46:50.297366Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:46:55.197053Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:46:55.308705Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:47:00.198315Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:47:00.315180Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:47:05.198943Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:47:05.319101Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:47:10.199829Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:47:10.328174Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:47:15.199978Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:47:15.332873Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:47:20.200214Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:47:20.349308Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:47:25.200783Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:47:25.353605Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:47:30.200930Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:47:30.364188Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:47:35.201469Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:47:35.374947Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:47:40.201816Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:47:40.387754Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:47:45.202157Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:47:45.398240Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:47:50.202501Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:47:50.403282Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:47:55.202893Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:47:55.411578Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:48:00.203398Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:48:00.425809Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:48:05.203627Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:48:05.440182Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:48:10.203837Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:48:10.450475Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:48:15.204386Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:48:15.455192Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:48:20.204716Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:48:20.465691Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:48:25.204920Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:48:25.474648Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:48:30.205532Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:48:30.475977Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:48:35.205749Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:48:35.488608Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:48:40.206188Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:48:40.493106Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:48:45.206547Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:48:45.499070Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:48:50.206695Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:48:50.508067Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:48:55.207301Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:48:55.516821Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:49:00.208193Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:49:00.529413Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:49:05.208707Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:49:05.532199Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:49:10.209335Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:49:10.544214Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:49:15.209841Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:49:15.551055Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:49:20.210371Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:49:20.560950Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:49:25.210571Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:49:25.570972Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:49:30.210684Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:49:30.584240Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:49:35.211181Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:49:35.589412Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:49:40.211593Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:49:40.597826Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:49:45.212751Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:49:45.598384Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:49:50.213873Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:49:50.611648Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:49:55.214312Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:49:55.614694Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:50:00.215145Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:50:00.618171Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:50:05.216103Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:50:05.627772Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:50:10.216824Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:50:10.641235Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:50:15.218184Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:50:15.813269Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:50:20.218435Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:50:20.815641Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:50:25.218984Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:50:25.855940Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:50:30.219935Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:50:30.871843Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:50:35.220125Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:50:35.879262Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:50:40.220715Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:50:40.887411Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:50:45.221497Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:50:45.902762Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:50:50.221729Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:50:50.908136Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:50:55.222003Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:50:55.925056Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:51:00.222657Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:51:00.928330Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:51:05.223339Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:51:05.941965Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:51:10.223672Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:51:10.945172Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:51:15.224453Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:51:15.955917Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:51:20.224894Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:51:20.958411Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:51:25.225868Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:51:25.974150Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:51:30.226218Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:51:30.987667Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:51:35.226783Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:51:35.996077Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:51:40.227388Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:51:41.013861Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:51:45.227984Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:51:46.022910Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:51:50.228636Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:51:51.033808Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:51:55.228997Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:51:56.046401Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:52:00.229180Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:52:01.052541Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:52:05.229641Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:52:06.068134Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:52:10.229943Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:52:11.080813Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:52:15.230038Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:52:16.090332Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0
+[2m2025-12-02T01:52:20.230258Z[0m [32m INFO[0m ⚡ Consumer Stats: 0 batches, 0 tx/s (Sequenced) | Arena: 0 ready
+[2m2025-12-02T01:52:21.100628Z[0m [32m INFO[0m 📊 Heartbeat | Arena: ready=0 free=16 | Sequenced: 0 | Applied: 0 | Lag: 0

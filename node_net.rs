@@ -207,7 +207,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .expect("Failed to pre-mint final batch");
     }
     info!("✅ Pre-minting complete!");
-
     // Threading Model
     let total_cores = num_cpus::get();
     let num_pairs = (total_cores / 2).max(1).min(pos::ARENA_MAX_WORKERS);
@@ -302,8 +301,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("✅ {} Consumer threads started", num_pairs);
 
-    info!("✅ {} Consumer threads started", num_pairs);
-
     // Spawn Producers
     if args.producer {
         let tps_per_producer = args.tps / num_pairs as u64;
@@ -367,23 +364,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-// Assuming shard_worker_loop is defined elsewhere, adding the log at its end.
-// This assumes the structure of shard_worker_loop ends with a loop and then the function itself.
-// The exact placement depends on the full definition of shard_worker_loop.
-// For this edit, I'm placing it after the assumed end of the function's main loop.
-// If shard_worker_loop is not defined in the provided context, this part is an assumption.
-// The instruction implies it should be placed after the closing braces of the loop and function.
-// Since the full definition of `shard_worker_loop` is not provided, I'm placing it
-// where the instruction suggests it would logically fit after the function's main loop.
-// This line would typically be inside the `shard_worker_loop` function, after its main processing loop.
-// For the purpose of this diff, I'm placing it as indicated by the instruction's context.
-
 fn start_shard_workers(
     ledger: Arc<GeometricLedger>,
     total_applied: Arc<AtomicU64>,
     total_rejected: Arc<AtomicU64>,
 ) -> Vec<std::sync::mpsc::SyncSender<ShardWork>> {
-    let num_shards = ledger.shard_count;
+    let num_shards = ledger.stats().shard_count;
     let mut senders = Vec::new();
 
     for i in 0..num_shards {
