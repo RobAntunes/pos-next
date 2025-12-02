@@ -583,7 +583,9 @@ async fn handle_quic_connections(
                                         WireMessage::MempoolStatus => {
                                             let stats = arena.stats();
                                             let response = WireMessage::MempoolStatusResponse {
-                                                pending_count: stats.total_submitted as u64, // Approximate pending
+                                                pending_count: (stats.zones_ready
+                                                    * pos::arena_mempool::ZONE_SIZE)
+                                                    as u64,
                                                 capacity_tps: 2_000_000, // Hardcoded for now, could be dynamic
                                             };
                                             let msg_bytes = serialize_message(&response).unwrap();
