@@ -9,8 +9,9 @@
 
 use clap::Parser;
 use pos::{
-    calculate_ring_position, Transaction, TransactionPayload, SignatureType,
-    messages::{serialize_message, WireMessage, SerializableTransaction},
+    calculate_ring_position,
+    messages::{serialize_message, SerializableTransaction, WireMessage},
+    SignatureType, Transaction, TransactionPayload,
 };
 use quinn::{ClientConfig, Endpoint};
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -55,11 +56,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Connect to both shards
     println!("🔗 Connecting to shards...");
-    let addr0: SocketAddr = args.shard_0
+    let addr0: SocketAddr = args
+        .shard_0
         .to_socket_addrs()?
         .next()
         .ok_or("Failed to resolve shard_0 address")?;
-    let addr1: SocketAddr = args.shard_1
+    let addr1: SocketAddr = args
+        .shard_1
         .to_socket_addrs()?
         .next()
         .ok_or("Failed to resolve shard_1 address")?;
@@ -73,7 +76,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Run load test
     let mode = if args.dumb { "DUMB" } else { "SMART" };
-    println!("🚀 Blasting {} transactions in {} mode...", args.count, mode);
+    println!(
+        "🚀 Blasting {} transactions in {} mode...",
+        args.count, mode
+    );
     println!();
 
     let start = Instant::now();
@@ -91,23 +97,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Secret is derived from index (for reproducibility)
         let secret_hash = blake3::hash(&i.to_le_bytes());
         let secret: [u8; 32] = *secret_hash.as_bytes();
-        
+
         // Sender address is the hash of the secret
         let sender_hash = blake3::hash(&secret);
         let sender: [u8; 32] = *sender_hash.as_bytes();
 
+        let recipient = [(i % 256) as u8; 32];
+        let timestamp = i; // Using 'i' as a dummy timestamp for this load test
+
         // Create transaction with HashReveal signature
         // The sequencer will verify: hash(secret) == sender
-        let tx = Transaction::new_fast(
+        let tx = Transaction::new(
             sender,
             TransactionPayload::Transfer {
-                recipient: [(i % 256) as u8; 32],
-                amount: 100,
+                recipient,
+                amount: 1,
                 nonce: i,
             },
-            i,
-            0,
-            secret
+            SignatureType::Ed25519([0u8; 64]), // Revert to Dummy Ed25519
+            timestamp,
         );
 
         // Calculate ring position
@@ -164,8 +172,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!("✅ Done!");
-    println!("   Sent to Shard 0: {} ({:.1}%)", sent_0, (sent_0 as f64 / args.count as f64) * 100.0);
-    println!("   Sent to Shard 1: {} ({:.1}%)", sent_1, (sent_1 as f64 / args.count as f64) * 100.0);
+    println!(
+        "   Sent to Shard 0: {} ({:.1}%)",
+        sent_0,
+        (sent_0 as f64 / args.count as f64) * 100.0
+    );
+    println!(
+        "   Sent to Shard 1: {} ({:.1}%)",
+        sent_1,
+        (sent_1 as f64 / args.count as f64) * 100.0
+    );
     println!("   Time: {:.2}s", elapsed.as_secs_f64());
     println!("   Average TPS: {:.0}", tps);
     println!();
@@ -201,11 +217,11 @@ fn create_transport_config() -> quinn::TransportConfig {
     let mut config = quinn::TransportConfig::default();
     config.max_concurrent_bidi_streams(1000u32.into());
     config.max_concurrent_uni_streams(1000u32.into());
-    
+
     // Connection timeout settings
     config.max_idle_timeout(Some(Duration::from_secs(10).try_into().unwrap()));
     config.keep_alive_interval(Some(Duration::from_secs(2)));
-    
+
     config
 }
 
