@@ -101,21 +101,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Sender address is the hash of the secret
         let sender_hash = blake3::hash(&secret);
         let sender: [u8; 32] = *sender_hash.as_bytes();
-
-        let recipient = [(i % 256) as u8; 32];
-        let timestamp = i; // Using 'i' as a dummy timestamp for this load test
+        let timestamp = i; // Define timestamp
 
         // Create transaction with HashReveal signature
         // The sequencer will verify: hash(secret) == sender
-        let tx = Transaction::new(
+        let tx = Transaction::new_fast(
             sender,
             TransactionPayload::Transfer {
-                recipient,
+                recipient: [(i % 256) as u8; 32],
                 amount: 1,
                 nonce: i,
             },
-            SignatureType::Ed25519([0u8; 64]), // Revert to Dummy Ed25519
+            i,
             timestamp,
+            secret,
         );
 
         // Calculate ring position
