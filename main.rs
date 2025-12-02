@@ -4,18 +4,17 @@
 //! Usage: cargo run --release
 
 // Use mimalloc for concurrent allocation (breaks the allocator lock bottleneck)
-use mimalloc::MiMalloc;
+// use mimalloc::MiMalloc;
 
-#[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+// #[global_allocator]
+// static GLOBAL: MiMalloc = MiMalloc;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pos::{
-    Sequencer, SequencerConfig, Transaction, TransactionPayload,
-    DEFAULT_BATCH_SIZE, MAX_DISTANCE,
+    Sequencer, SequencerConfig, Transaction, TransactionPayload, DEFAULT_BATCH_SIZE, MAX_DISTANCE,
 };
 use rand::RngCore;
 use rayon::prelude::*;
@@ -37,8 +36,7 @@ async fn main() {
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info"))
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .with_target(false)
         .with_thread_ids(false)
@@ -64,7 +62,7 @@ async fn main() {
     };
 
     let sequencer = Arc::new(Sequencer::new(config));
-    
+
     // Get number of CPU cores
     let num_cpus = std::thread::available_parallelism()
         .map(|p| p.get())
@@ -77,12 +75,13 @@ async fn main() {
     println!();
 
     // PRE-GENERATE test data pool to eliminate generator overhead
-    println!("📦 Pre-generating {} batches ({} transactions)...", 
-        PREGENERATED_BATCHES, 
+    println!(
+        "📦 Pre-generating {} batches ({} transactions)...",
+        PREGENERATED_BATCHES,
         PREGENERATED_BATCHES * TX_BATCH_SIZE
     );
     let gen_start = Instant::now();
-    
+
     let tx_pool: Vec<Vec<Transaction>> = (0..PREGENERATED_BATCHES)
         .into_par_iter()
         .map(|batch_idx| {
@@ -91,7 +90,7 @@ async fn main() {
                 .collect()
         })
         .collect();
-    
+
     println!("   Generated in {:.2}s", gen_start.elapsed().as_secs_f64());
     println!();
 
@@ -106,7 +105,7 @@ async fn main() {
     // Metrics display task
     let running_metrics = Arc::clone(&running);
     let processed_metrics = Arc::clone(&total_processed);
-    
+
     // OPTIMAL CONFIGURATION: Single feeder worker
     // Rayon handles internal parallelism across all 8 cores.
     // Multiple feeders cause context-switching overhead (64 threads on 8 cores).
@@ -115,7 +114,7 @@ async fn main() {
     println!();
 
     let mut handles = Vec::new();
-    
+
     for worker_id in 0..num_workers {
         let running = Arc::clone(&running);
         let total_processed = Arc::clone(&total_processed);
@@ -136,7 +135,7 @@ async fn main() {
 
                 // Process using lock-free reduction on the SHARED sequencer
                 let (accepted, rejected) = sequencer.process_batch_ref(txs);
-                
+
                 // Check if batch is ready and finalize to free memory
                 if sequencer.batch_ready() {
                     let _ = sequencer.finalize_batch();
@@ -160,7 +159,7 @@ async fn main() {
 
         handles.push(handle);
     }
-    
+
     let metrics_handle = tokio::spawn(async move {
         let start = Instant::now();
         let mut last_count = 0u64;
@@ -177,7 +176,7 @@ async fn main() {
             let now = Instant::now();
             let elapsed = start.elapsed();
             let current_count = processed_metrics.load(Ordering::Relaxed);
-            
+
             // Calculate current TPS (transactions in last interval)
             let interval = now.duration_since(last_time).as_secs_f64();
             let interval_txs = current_count.saturating_sub(last_count);
@@ -220,7 +219,7 @@ async fn main() {
         }
 
         println!("└─────────┴────────────────┴────────────────┴────────────────┴───────────────┘");
-        
+
         (peak_tps, processed_metrics.load(Ordering::Relaxed))
     });
 
@@ -239,24 +238,39 @@ async fn main() {
     println!("╔═══════════════════════════════════════════════════════════════╗");
     println!("║                     BENCHMARK RESULTS                         ║");
     println!("╠═══════════════════════════════════════════════════════════════╣");
-    
+
     let total_processed = total_processed.load(Ordering::Relaxed);
     let total_rejected = total_rejected.load(Ordering::Relaxed);
     let avg_tps = total_processed as f64 / BENCHMARK_DURATION.as_secs_f64();
-    
-    println!("║  Total Transactions:  {:>40} ║", format_number(total_processed));
-    println!("║  Rejected (distance): {:>40} ║", format_number(total_rejected));
-    println!("║  Average TPS:         {:>40} ║", format_number(avg_tps as u64));
-    println!("║  Peak TPS:            {:>40} ║", format_number(peak_tps as u64));
-    println!("║  Duration:            {:>40} ║", format!("{}s", BENCHMARK_DURATION.as_secs()));
+
+    println!(
+        "║  Total Transactions:  {:>40} ║",
+        format_number(total_processed)
+    );
+    println!(
+        "║  Rejected (distance): {:>40} ║",
+        format_number(total_rejected)
+    );
+    println!(
+        "║  Average TPS:         {:>40} ║",
+        format_number(avg_tps as u64)
+    );
+    println!(
+        "║  Peak TPS:            {:>40} ║",
+        format_number(peak_tps as u64)
+    );
+    println!(
+        "║  Duration:            {:>40} ║",
+        format!("{}s", BENCHMARK_DURATION.as_secs())
+    );
     println!("╚═══════════════════════════════════════════════════════════════╝");
 
     // Finalize any pending batch
     if let Some(batch) = sequencer.finalize_batch() {
         println!();
-        println!("Final batch: {} transactions, round {}", 
-            batch.header.tx_count, 
-            batch.header.round_id
+        println!(
+            "Final batch: {} transactions, round {}",
+            batch.header.tx_count, batch.header.round_id
         );
     }
 }
@@ -287,14 +301,14 @@ fn format_number(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::new();
     let chars: Vec<char> = s.chars().collect();
-    
+
     for (i, c) in chars.iter().enumerate() {
         if i > 0 && (chars.len() - i) % 3 == 0 {
             result.push(',');
         }
         result.push(*c);
     }
-    
+
     result
 }
 
