@@ -304,6 +304,10 @@ impl Shard {
                 .account_count
                 .fetch_add(insert_count as u32, Ordering::Relaxed);
             if offset + (insert_count as u32) > ACCOUNTS_PER_SHARD as u32 {
+                println!(
+                    "❌ Shard full! Offset: {}, Insert: {}, Max: {}",
+                    offset, insert_count, ACCOUNTS_PER_SHARD
+                );
                 return Err("Shard full".to_string());
             }
             offset
