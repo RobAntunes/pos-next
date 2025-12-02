@@ -10,7 +10,7 @@
 use clap::Parser;
 use pos::{
     calculate_ring_position,
-    messages::{deserialize_message, serialize_message, SerializableTransaction, WireMessage},
+    messages::{deserialize_message, serialize_message, SerializableTransaction, WireMessage, RedirectReason},
     SignatureType, Transaction, TransactionPayload,
 };
 use quinn::{ClientConfig, Endpoint};
@@ -18,7 +18,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 
 #[derive(Parser)]
 #[command(author, version, about = "Smart Client - Ring-Aware Load Tester")]
@@ -46,6 +46,26 @@ struct Args {
     /// Start index offset (to avoid nonce collisions on persistent ledger)
     #[arg(long, default_value_t = 0)]
     offset: u64,
+
+    /// Transactions per batch (per stream)
+    #[arg(long, default_value_t = 45_000)]
+    batch_size: usize,
+
+    /// Max in-flight QUIC streams per connection
+    #[arg(long, default_value_t = 8)]
+    inflight: usize,
+
+    /// Optional coordinated start time (unix epoch seconds)
+    #[arg(long)]
+    start_at: Option<u64>,
+
+    /// Enable elastic per-machine scaling based on server mempool feedback
+    #[arg(long, default_value_t = false)]
+    elastic: bool,
+
+    /// Elastic feedback polling interval (ms)
+    #[arg(long, default_value_t = 500)]
+    elastic_interval_ms: u64,
 }
 
 #[tokio::main]
@@ -80,6 +100,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✅ Connected to Shard 1: {}", addr1);
     println!();
 
+    // Optional coordinated start (for multi-host runs)
+    if let Some(start_at) = args.start_at {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        if start_at > now {
+            let wait_s = start_at - now;
+            println!("⏳ Waiting {}s for coordinated start...", wait_s);
+            tokio::time::sleep(Duration::from_secs(wait_s)).await;
+        }
+    }
+
     // Multi-threaded load generation
     let num_threads = num_cpus::get();
     let tx_per_thread = args.count / num_threads as u64;
@@ -97,14 +130,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         0
     }));
 
-    // Start background poller for backpressure
+    // Start background poller for backpressure (optional elastic)
     let delay_clone = delay_micros.clone();
     let conn0_clone = conn0.clone();
     let conn1_clone = conn1.clone();
+    if args.elastic {
+        let poll_interval = Duration::from_millis(args.elastic_interval_ms);
+        tokio::spawn(async move {
+            // Simple feedback loop: AIMD based on pending queue growth
+            let mut last_pending: u64 = 0;
+            loop {
+                tokio::time::sleep(poll_interval).await;
+                // Query both shards; if one fails, continue
+                let mut pending_sum = 0u64;
+                let mut capacity_sum = 0u64;
+                if let Ok((p, c)) = mempool_status(&conn0_clone).await { pending_sum += p; capacity_sum += c; }
+                if let Ok((p, c)) = mempool_status(&conn1_clone).await { pending_sum += p; capacity_sum += c; }
+
+                // If capacity is zero (shouldn't), skip
+                if capacity_sum == 0 { continue; }
+
+                // If pending is growing, slow down; if shrinking, speed up
+                if pending_sum > last_pending {
+                    // back off aggressively when queues grow
+                    let current = delay_clone.load(Ordering::Relaxed);
+                    let new_delay = if current == 0 { 50 } else { (current as f64 * 1.5) as u64 };
+                    delay_clone.store(new_delay.min(20_000), Ordering::Relaxed);
+                } else if pending_sum < last_pending.saturating_sub(10_000) {
+                    // queues draining -> speed up
+                    let current = delay_clone.load(Ordering::Relaxed);
+                    if current > 0 {
+                        delay_clone.store(current / 2, Ordering::Relaxed);
+                    }
+                }
+                last_pending = pending_sum;
+            }
+        });
+    }
 
     let total_sent = Arc::new(AtomicU64::new(0));
     let sent_0 = Arc::new(AtomicU64::new(0));
     let sent_1 = Arc::new(AtomicU64::new(0));
+
+    // Per-connection inflight stream limit
+    let sem0 = Arc::new(Semaphore::new(args.inflight));
+    let sem1 = Arc::new(Semaphore::new(args.inflight));
 
     // Spawn monitor task
     let total_sent_monitor = total_sent.clone();
@@ -144,6 +214,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let total_sent = total_sent.clone();
         let sent_0 = sent_0.clone();
         let sent_1 = sent_1.clone();
+        let sem0 = sem0.clone();
+        let sem1 = sem1.clone();
         let dumb_mode = args.dumb;
         let offset = args.offset;
         let start_idx = t as u64 * tx_per_thread;
@@ -155,7 +227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tps_limit = args.tps / num_threads as u64;
 
         handles.push(tokio::spawn(async move {
-            let batch_size = 45000;
+            let batch_size = args.batch_size;
             let mut batch_0 = Vec::with_capacity(batch_size);
             let mut batch_1 = Vec::with_capacity(batch_size);
 
@@ -201,14 +273,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if batch_0.len() >= batch_size {
-                    if let Err(e) = send_batch(&conn0, &batch_0).await {
-                        eprintln!("Error sending batch to Shard 0: {}", e);
+                    if let Ok(permit) = sem0.clone().acquire_owned().await {
+                        if let Err(e) = send_batch(&conn0, &batch_0).await {
+                            eprintln!("Error sending batch to Shard 0: {}", e);
+                        }
+                        drop(permit);
                     }
                     batch_0.clear();
                 }
                 if batch_1.len() >= batch_size {
-                    if let Err(e) = send_batch(&conn1, &batch_1).await {
-                        eprintln!("Error sending batch to Shard 1: {}", e);
+                    if let Ok(permit) = sem1.clone().acquire_owned().await {
+                        if let Err(e) = send_batch(&conn1, &batch_1).await {
+                            eprintln!("Error sending batch to Shard 1: {}", e);
+                        }
+                        drop(permit);
                     }
                     batch_1.clear();
                 }
@@ -227,10 +305,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Flush remaining
             if !batch_0.is_empty() {
-                let _ = send_batch(&conn0, &batch_0).await;
+                if let Ok(permit) = sem0.clone().acquire_owned().await {
+                    let _ = send_batch(&conn0, &batch_0).await;
+                    drop(permit);
+                }
             }
             if !batch_1.is_empty() {
-                let _ = send_batch(&conn1, &batch_1).await;
+                if let Ok(permit) = sem1.clone().acquire_owned().await {
+                    let _ = send_batch(&conn1, &batch_1).await;
+                    drop(permit);
+                }
             }
         }));
     }
@@ -271,10 +355,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Result of sending a batch, includes flow control info
+#[derive(Debug)]
+enum BatchResult {
+    /// Batch accepted, with remaining credits
+    Accepted { credits: u64, current_tps: u64 },
+    /// Redirected to another node
+    Redirected { suggested_node: String, reason: RedirectReason },
+    /// No response (legacy compatibility)
+    NoResponse,
+}
+
 async fn send_batch(
     conn: &quinn::Connection,
     txs: &[Transaction],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<BatchResult, Box<dyn std::error::Error>> {
     let serializable_txs: Vec<SerializableTransaction> = txs
         .iter()
         .map(|tx| SerializableTransaction::from(tx.clone()))
@@ -286,11 +381,42 @@ async fn send_batch(
     let msg_bytes = serialize_message(&msg)?;
 
     // Open a single stream for the whole batch
-    let (mut send, _recv) = conn.open_bi().await?;
+    let (mut send, mut recv) = conn.open_bi().await?;
     send.write_all(&msg_bytes).await?;
     send.finish().await?;
 
-    Ok(())
+    // Read server response (BatchAccepted or BatchRedirect)
+    match recv.read_to_end(64 * 1024).await {
+        Ok(resp) if !resp.is_empty() => {
+            match deserialize_message(&resp) {
+                Ok(WireMessage::BatchAccepted { accepted_count: _, credits, current_tps }) => {
+                    Ok(BatchResult::Accepted { credits, current_tps })
+                }
+                Ok(WireMessage::BatchRedirect { suggested_node, reason, .. }) => {
+                    eprintln!("📡 Server redirected us to {} (reason: {:?})", suggested_node, reason);
+                    Ok(BatchResult::Redirected { suggested_node, reason })
+                }
+                _ => Ok(BatchResult::NoResponse),
+            }
+        }
+        _ => Ok(BatchResult::NoResponse),
+    }
+}
+
+// Query mempool status from a connected shard
+async fn mempool_status(conn: &quinn::Connection) -> Result<(u64, u64), Box<dyn std::error::Error>> {
+    let msg = WireMessage::MempoolStatus;
+    let bytes = serialize_message(&msg)?;
+    let (mut send, mut recv) = conn.open_bi().await?;
+    send.write_all(&bytes).await?;
+    send.finish().await?;
+
+    let resp = recv.read_to_end(64 * 1024).await?;
+    if let WireMessage::MempoolStatusResponse { pending_count, capacity_tps } = deserialize_message(&resp)? {
+        Ok((pending_count, capacity_tps))
+    } else {
+        Err("unexpected response".into())
+    }
 }
 
 fn create_client_endpoint() -> Result<Endpoint, Box<dyn std::error::Error>> {

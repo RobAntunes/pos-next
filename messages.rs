@@ -83,6 +83,37 @@ pub enum WireMessage {
         /// Serialized transaction
         tx: SerializableTransaction,
     },
+
+    /// Batch accepted response with flow control credits
+    BatchAccepted {
+        /// Number of transactions accepted
+        accepted_count: u64,
+        /// Credits: how many more transactions the client can send
+        credits: u64,
+        /// Current processing TPS (for client info)
+        current_tps: u64,
+    },
+
+    /// Redirect client to another node (load balancing / overflow)
+    BatchRedirect {
+        /// Suggested node address (ip:port as string for simplicity)
+        suggested_node: String,
+        /// Reason for redirect
+        reason: RedirectReason,
+        /// Credits available at suggested node (if known)
+        suggested_credits: u64,
+    },
+}
+
+/// Reasons for redirecting a batch to another node
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum RedirectReason {
+    /// This node's arena is full
+    ArenaFull,
+    /// Load balancing - other node has more capacity
+    LoadBalancing,
+    /// Transaction belongs to different shard
+    WrongShard,
 }
 
 /// Serializable version of BatchHeader (bincode-compatible)

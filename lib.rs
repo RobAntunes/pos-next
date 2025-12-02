@@ -13,7 +13,7 @@ pub mod tui;
 
 pub use sequencer::{Sequencer, SequencerConfig};
 pub use round::{RoundManager, RoundConfig, RoundMetrics};
-pub use messages::{WireMessage, SerializableBatchHeader, SerializableTransaction, PROTOCOL_VERSION};
+pub use messages::{WireMessage, SerializableBatchHeader, SerializableTransaction, PROTOCOL_VERSION, RedirectReason};
 pub use mempool::{Mempool, MempoolConfig, MempoolStats};
 pub use arena_mempool::{ArenaMempool, ArenaStats, MAX_WORKERS as ARENA_MAX_WORKERS, ZONE_SIZE};
 pub use ring::{RingRoutingTable, VirtualNodeConfig, calculate_ring_position};

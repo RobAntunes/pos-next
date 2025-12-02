@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use pos::{
-    messages::{deserialize_message, serialize_message},
+    messages::{deserialize_message, serialize_message, RedirectReason},
     ArenaMempool, GeometricLedger, Sequencer, SequencerConfig, Transaction, TransactionPayload,
     WireMessage, PROTOCOL_VERSION,
 };
@@ -74,6 +74,131 @@ struct DiscoveredPeer {
     peer_id: PeerId,
     multiaddr: Multiaddr,
     quic_port: u16,
+}
+
+/// Perigee-inspired peer scoring for capacity-aware routing
+/// Score = (avg_credits / avg_latency) + UCB exploration bonus
+struct PeerScore {
+    address: String,
+    credits_sum: AtomicU64,
+    latency_sum_ms: AtomicU64,
+    sample_count: AtomicU64,
+    last_updated: AtomicU64,
+}
+
+impl PeerScore {
+    fn new(address: String) -> Self {
+        Self {
+            address,
+            credits_sum: AtomicU64::new(0),
+            latency_sum_ms: AtomicU64::new(0),
+            sample_count: AtomicU64::new(0),
+            last_updated: AtomicU64::new(0),
+        }
+    }
+
+    /// Update score with new observation (credits received, ACK latency)
+    fn update(&self, credits: u64, latency_ms: u64) {
+        self.credits_sum.fetch_add(credits, Ordering::Relaxed);
+        self.latency_sum_ms.fetch_add(latency_ms.max(1), Ordering::Relaxed);
+        self.sample_count.fetch_add(1, Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        self.last_updated.store(now, Ordering::Relaxed);
+    }
+
+    /// Perigee UCB score: exploitation + exploration
+    fn score(&self, total_samples: u64) -> f64 {
+        let samples = self.sample_count.load(Ordering::Relaxed);
+        if samples == 0 {
+            return f64::MAX; // Explore unknown peers first
+        }
+
+        let avg_credits = self.credits_sum.load(Ordering::Relaxed) as f64 / samples as f64;
+        let avg_latency = self.latency_sum_ms.load(Ordering::Relaxed) as f64 / samples as f64;
+
+        // Exploitation: credits per ms of latency
+        let exploitation = avg_credits / avg_latency.max(1.0);
+
+        // Exploration bonus (UCB): sqrt(2 * ln(N) / n)
+        let exploration = if total_samples > 0 {
+            (2.0 * (total_samples as f64).ln() / samples as f64).sqrt()
+        } else {
+            0.0
+        };
+
+        exploitation + exploration * 1000.0 // Scale exploration to be meaningful
+    }
+
+    fn get_credits(&self) -> u64 {
+        let samples = self.sample_count.load(Ordering::Relaxed);
+        if samples == 0 {
+            return u64::MAX;
+        }
+        self.credits_sum.load(Ordering::Relaxed) / samples
+    }
+}
+
+/// Thread-safe peer registry with Perigee-style scoring
+struct PeerRegistry {
+    peers: std::sync::RwLock<Vec<Arc<PeerScore>>>,
+    total_samples: AtomicU64,
+}
+
+impl PeerRegistry {
+    fn new() -> Self {
+        Self {
+            peers: std::sync::RwLock::new(Vec::new()),
+            total_samples: AtomicU64::new(0),
+        }
+    }
+
+    fn add_peer(&self, address: String) {
+        let mut peers = self.peers.write().unwrap();
+        if !peers.iter().any(|p| p.address == address) {
+            info!("📡 Perigee: Added peer {} to registry", address);
+            peers.push(Arc::new(PeerScore::new(address)));
+        }
+    }
+
+    /// Update peer score after receiving BatchAccepted
+    fn update_peer(&self, address: &str, credits: u64, latency_ms: u64) {
+        let peers = self.peers.read().unwrap();
+        if let Some(peer) = peers.iter().find(|p| p.address == address) {
+            peer.update(credits, latency_ms);
+            self.total_samples.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Get best peer for forwarding (highest Perigee score)
+    fn get_best_peer(&self, exclude: Option<&str>) -> Option<String> {
+        let peers = self.peers.read().unwrap();
+        let total = self.total_samples.load(Ordering::Relaxed);
+
+        peers
+            .iter()
+            .filter(|p| exclude.map_or(true, |e| p.address != e))
+            .filter(|p| p.get_credits() > 0) // Must have some capacity
+            .max_by(|a, b| {
+                a.score(total)
+                    .partial_cmp(&b.score(total))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|p| p.address.clone())
+    }
+
+    /// Get peer with most capacity (for forwarding)
+    fn get_peer_with_capacity(&self, exclude: Option<&str>, min_credits: u64) -> Option<String> {
+        let peers = self.peers.read().unwrap();
+        peers
+            .iter()
+            .filter(|p| exclude.map_or(true, |e| p.address != e))
+            .filter(|p| p.get_credits() >= min_credits)
+            .max_by_key(|p| p.get_credits())
+            .map(|p| p.address.clone())
+    }
 }
 
 // Custom behaviour: just mDNS for local discovery
@@ -243,6 +368,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Channel for discovered peers
     let (peer_tx, mut peer_rx) = mpsc::channel::<DiscoveredPeer>(100);
 
+    // Initialize Perigee-style peer registry for capacity-aware routing
+    let peer_registry = Arc::new(PeerRegistry::new());
+    let peer_registry_clone = peer_registry.clone();
+
     // Start QUIC transport
     let quic_endpoint = start_quic_server(args.port).await?;
     let quic_endpoint_clone = quic_endpoint.clone();
@@ -251,16 +380,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_received_clone = total_received.clone();
     let arena_clone = arena.clone();
     let node_id = generate_node_id(&node_name);
+    let listen_port = args.port;
 
-    // Spawn QUIC listener
+    // Spawn QUIC listener with three-layer flow control
     tokio::spawn(async move {
         handle_quic_connections(
             quic_endpoint_clone,
             arena_clone,
             total_received_clone,
             node_id,
-            args.port,
+            listen_port,
             num_pairs,
+            peer_registry_clone,
         )
         .await;
     });
@@ -361,7 +492,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(peer_info) = peer_rx.recv() => {
                         info!("🔎 NEW PEER DISCOVERED via mDNS!");
                         if let Some(ip) = extract_ip_from_multiaddr(&peer_info.multiaddr) {
+                            // Determine peer's QUIC port (alternate between 9000/9001 for now)
                             let target_port = if args.port == 9000 { 9001 } else { 9000 };
+                            
+                            // Add to Perigee peer registry for capacity-aware forwarding
+                            let peer_addr = format!("{}:{}", ip, target_port);
+                            peer_registry.add_peer(peer_addr);
+                            
                             let endpoint = quic_endpoint.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = connect_to_peer(endpoint, ip, target_port).await {
@@ -500,7 +637,9 @@ async fn start_mdns_discovery(
 /// Start QUIC server
 async fn start_quic_server(port: u16) -> Result<Endpoint, Box<dyn std::error::Error>> {
     let (cert, key) = generate_self_signed_cert()?;
-    let server_config = ServerConfig::with_single_cert(vec![cert], key)?;
+    let mut server_config = ServerConfig::with_single_cert(vec![cert], key)?;
+    // Apply transport config to SERVER (critical for handling many concurrent streams)
+    server_config.transport_config(Arc::new(create_server_transport_config()));
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
     let mut endpoint = Endpoint::server(server_config, addr)?;
     let crypto = rustls::ClientConfig::builder()
@@ -513,21 +652,30 @@ async fn start_quic_server(port: u16) -> Result<Endpoint, Box<dyn std::error::Er
     Ok(endpoint)
 }
 
-/// Handle incoming QUIC connections
+/// Handle incoming QUIC connections with three-layer flow control:
+/// Layer 1: QUIC transport backpressure (delay read until capacity)
+/// Layer 2: BatchAccepted response with credits
+/// Layer 3: Perigee-inspired peer forwarding when overloaded
 async fn handle_quic_connections(
     endpoint: Endpoint,
-    arena: Arc<ArenaMempool>, // Changed from Mempool
+    arena: Arc<ArenaMempool>,
     total_received: Arc<AtomicU64>,
     _node_id: [u8; 32],
-    _listen_port: u16,
+    listen_port: u16,
     num_active_workers: usize,
+    peer_registry: Arc<PeerRegistry>,
 ) {
     let next_worker = Arc::new(AtomicUsize::new(0));
+    let current_tps = Arc::new(AtomicU64::new(0));
+    let self_address = format!("0.0.0.0:{}", listen_port);
 
     while let Some(connecting) = endpoint.accept().await {
         let arena = arena.clone();
         let total_received = total_received.clone();
         let next_worker = next_worker.clone();
+        let current_tps = current_tps.clone();
+        let peer_registry = peer_registry.clone();
+        let self_addr = self_address.clone();
 
         tokio::spawn(async move {
             match connecting.await {
@@ -536,15 +684,38 @@ async fn handle_quic_connections(
                         let arena = arena.clone();
                         let total_received = total_received.clone();
                         let next_worker = next_worker.clone();
+                        let current_tps = current_tps.clone();
+                        let peer_registry = peer_registry.clone();
+                        let self_addr = self_addr.clone();
+
                         tokio::spawn(async move {
+                            // ═══════════════════════════════════════════════════════
+                            // LAYER 1: QUIC Transport Backpressure
+                            // Delay reading until we have capacity. QUIC flow control
+                            // will naturally stall the sender's write.
+                            // ═══════════════════════════════════════════════════════
+                            let mut backpressure_wait = 0u32;
+                            while arena.is_full() && backpressure_wait < 100 {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                                backpressure_wait += 1;
+                            }
+
                             if let Ok(data) = recv.read_to_end(10 * 1024 * 1024).await {
                                 if let Ok(msg) = deserialize_message(&data) {
                                     match msg {
                                         WireMessage::TransactionSubmission { tx } => {
                                             let tx: Transaction = tx.into();
-                                            // Use legacy submission for random individual txs
                                             if arena.submit_batch(&[tx]) {
                                                 total_received.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            // Layer 2: Send BatchAccepted with credits
+                                            let response = WireMessage::BatchAccepted {
+                                                accepted_count: 1,
+                                                credits: arena.free_capacity(),
+                                                current_tps: current_tps.load(Ordering::Relaxed),
+                                            };
+                                            if let Ok(msg_bytes) = serialize_message(&response) {
+                                                let _ = send.write_all(&msg_bytes).await;
                                             }
                                             let _ = send.finish().await;
                                         }
@@ -553,58 +724,92 @@ async fn handle_quic_connections(
                                                 txs.into_iter().map(|tx| tx.into()).collect();
                                             let count = txs.len();
 
-                                            // Round-robin to active workers only
                                             let worker_id = next_worker
                                                 .fetch_add(1, Ordering::Relaxed)
                                                 % num_active_workers;
 
-                                            // Try to submit to the chosen worker's partition
-                                            if arena.submit_batch_partitioned(worker_id, &txs) {
-                                                total_received
-                                                    .fetch_add(count as u64, Ordering::Relaxed);
+                                            // Try to submit
+                                            let submitted = if arena.submit_batch_partitioned(worker_id, &txs) {
+                                                total_received.fetch_add(count as u64, Ordering::Relaxed);
+                                                true
                                             } else {
-                                                // If full, try one more random worker as fallback
-                                                let retry_worker =
-                                                    (worker_id + 1) % num_active_workers;
-                                                if arena
-                                                    .submit_batch_partitioned(retry_worker, &txs)
-                                                {
-                                                    total_received
-                                                        .fetch_add(count as u64, Ordering::Relaxed);
+                                                // Fallback to another worker
+                                                let retry_worker = (worker_id + 1) % num_active_workers;
+                                                if arena.submit_batch_partitioned(retry_worker, &txs) {
+                                                    total_received.fetch_add(count as u64, Ordering::Relaxed);
+                                                    true
                                                 } else {
-                                                    warn!(
-                                                        "Arena full! Dropped batch of {} txs",
-                                                        count
+                                                    false
+                                                }
+                                            };
+
+                                            if submitted {
+                                                // ═══════════════════════════════════════════
+                                                // LAYER 2: BatchAccepted with credits
+                                                // ═══════════════════════════════════════════
+                                                let response = WireMessage::BatchAccepted {
+                                                    accepted_count: count as u64,
+                                                    credits: arena.free_capacity(),
+                                                    current_tps: current_tps.load(Ordering::Relaxed),
+                                                };
+                                                if let Ok(msg_bytes) = serialize_message(&response) {
+                                                    let _ = send.write_all(&msg_bytes).await;
+                                                }
+                                            } else {
+                                                // ═══════════════════════════════════════════
+                                                // LAYER 3: Perigee-inspired peer forwarding
+                                                // Find best peer with capacity and redirect
+                                                // ═══════════════════════════════════════════
+                                                if let Some(best_peer) = peer_registry
+                                                    .get_peer_with_capacity(Some(&self_addr), count as u64)
+                                                {
+                                                    info!(
+                                                        "📡 Perigee: Redirecting batch of {} txs to {}",
+                                                        count, best_peer
                                                     );
+                                                    let response = WireMessage::BatchRedirect {
+                                                        suggested_node: best_peer,
+                                                        reason: RedirectReason::ArenaFull,
+                                                        suggested_credits: 0, // Unknown
+                                                    };
+                                                    if let Ok(msg_bytes) = serialize_message(&response) {
+                                                        let _ = send.write_all(&msg_bytes).await;
+                                                    }
+                                                } else {
+                                                    // No peers available, send BatchAccepted with 0 credits
+                                                    warn!("Arena full, no peers available for redirect");
+                                                    let response = WireMessage::BatchAccepted {
+                                                        accepted_count: 0,
+                                                        credits: 0,
+                                                        current_tps: current_tps.load(Ordering::Relaxed),
+                                                    };
+                                                    if let Ok(msg_bytes) = serialize_message(&response) {
+                                                        let _ = send.write_all(&msg_bytes).await;
+                                                    }
                                                 }
                                             }
                                             let _ = send.finish().await;
                                         }
                                         WireMessage::MempoolStatus => {
-                                            let stats = arena.stats();
                                             let response = WireMessage::MempoolStatusResponse {
-                                                pending_count: (stats.zones_ready
-                                                    * pos::arena_mempool::ZONE_SIZE)
-                                                    as u64,
-                                                capacity_tps: 2_000_000, // Hardcoded for now, could be dynamic
-                                            }; // Forced update
-                                            let msg_bytes = serialize_message(&response).unwrap();
-                                            let _ = send.write_all(&msg_bytes).await;
+                                                pending_count: arena.free_capacity(),
+                                                capacity_tps: current_tps.load(Ordering::Relaxed),
+                                            };
+                                            if let Ok(msg_bytes) = serialize_message(&response) {
+                                                let _ = send.write_all(&msg_bytes).await;
+                                            }
                                             let _ = send.finish().await;
                                         }
                                         _ => {
                                             let _ = send.finish().await;
                                         }
                                     }
-                                } else {
-                                    // Log failure to help debug Windows/Mac mismatch
-                                    if let Err(e) = deserialize_message(&data) {
-                                        warn!(
-                                            "Failed to deserialize message ({} bytes): {}",
-                                            data.len(),
-                                            e
-                                        );
-                                    }
+                                } else if let Err(e) = deserialize_message(&data) {
+                                    warn!(
+                                        "Failed to deserialize message ({} bytes): {}",
+                                        data.len(),
+                                        e
+                                    );
                                 }
                             }
                         });
@@ -648,7 +853,25 @@ fn generate_self_signed_cert(
 
 fn create_transport_config() -> quinn::TransportConfig {
     let mut config = quinn::TransportConfig::default();
-    config.max_concurrent_bidi_streams(100u32.into());
+    config.max_concurrent_bidi_streams(1000u32.into());
+    config.max_concurrent_uni_streams(1000u32.into());
+    config.max_idle_timeout(Some(Duration::from_secs(30).try_into().unwrap()));
+    config.keep_alive_interval(Some(Duration::from_secs(5)));
+    config
+}
+
+fn create_server_transport_config() -> quinn::TransportConfig {
+    let mut config = quinn::TransportConfig::default();
+    // Allow many concurrent streams from clients sending batches
+    config.max_concurrent_bidi_streams(10_000u32.into());
+    config.max_concurrent_uni_streams(10_000u32.into());
+    // Increase receive window for high-throughput batch ingestion
+    config.receive_window((32 * 1024 * 1024u32).into()); // 32MB
+    config.stream_receive_window((16 * 1024 * 1024u32).into()); // 16MB per stream
+    config.send_window(32 * 1024 * 1024); // 32MB
+    // Longer timeout for sustained load
+    config.max_idle_timeout(Some(Duration::from_secs(60).try_into().unwrap()));
+    config.keep_alive_interval(Some(Duration::from_secs(10)));
     config
 }
 

@@ -265,6 +265,48 @@ impl ArenaMempool {
             zones_free: free,
         }
     }
+
+    /// Check if arena is completely full (no free zones)
+    #[inline]
+    pub fn is_full(&self) -> bool {
+        self.zones
+            .iter()
+            .all(|z| z.state.load(Ordering::Relaxed) != FREE)
+    }
+
+    /// Check if arena has capacity for at least one batch
+    #[inline]
+    pub fn has_capacity(&self) -> bool {
+        self.zones
+            .iter()
+            .any(|z| z.state.load(Ordering::Relaxed) == FREE)
+    }
+
+    /// Get free capacity in transactions (approximate)
+    #[inline]
+    pub fn free_capacity(&self) -> u64 {
+        let free_zones = self
+            .zones
+            .iter()
+            .filter(|z| z.state.load(Ordering::Relaxed) == FREE)
+            .count();
+        (free_zones * ZONE_SIZE) as u64
+    }
+
+    /// Check if a specific worker's partition has capacity
+    #[inline]
+    pub fn worker_has_capacity(&self, worker_id: usize) -> bool {
+        if worker_id >= MAX_WORKERS {
+            return false;
+        }
+        for i in 0..ZONES_PER_WORKER {
+            let zone_idx = Self::zone_index(worker_id, i);
+            if self.zones[zone_idx].state.load(Ordering::Relaxed) == FREE {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl Default for ArenaMempool {
