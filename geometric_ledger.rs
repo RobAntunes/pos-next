@@ -30,10 +30,9 @@ impl Default for Account {
 }
 
 const ACCOUNT_SIZE: usize = 128;
-const SHARD_COUNT: usize = 16;
-// 1M accounts per shard (256 shards × 1M = 256M total capacity)
-// With 8-byte alignment (down from 64), uses ~4GB RAM instead of 32GB
-const ACCOUNTS_PER_SHARD: usize = 2_000_000;
+// Removed constants to support dynamic configuration
+// const SHARD_COUNT: usize = 16;
+// const ACCOUNTS_PER_SHARD: usize = 2_000_000;
 
 // Atomic index slot
 // OPTIMIZATION: align(64) for cache line alignment - prevents false sharing between adjacent slots
@@ -81,19 +80,23 @@ impl AtomicSlot {
     }
 }
 
-const INDEX_SIZE: usize = ACCOUNTS_PER_SHARD * 2;
+// Index size is dynamic based on accounts_per_shard
+// const INDEX_SIZE: usize = ACCOUNTS_PER_SHARD * 2;
 
 struct Shard {
     mmap: MmapMut,
     index: Box<[AtomicSlot]>,
     account_count: AtomicU32,
     write_count: AtomicU64,
+    accounts_per_shard: usize,
+    index_size: usize,
 }
 
 impl Shard {
-    fn open(data_dir: &Path, shard_id: usize) -> Result<Self, String> {
+    fn open(data_dir: &Path, shard_id: usize, accounts_per_shard: usize) -> Result<Self, String> {
         let path = data_dir.join(format!("shard_{:03}.bin", shard_id));
-        let size = (ACCOUNTS_PER_SHARD * ACCOUNT_SIZE) as u64;
+        let size = (accounts_per_shard * ACCOUNT_SIZE) as u64;
+        let index_size = accounts_per_shard * 2;
 
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -118,8 +121,8 @@ impl Shard {
                 .map_err(|e| format!("Failed to mmap: {}", e))?
         };
 
-        let mut index_vec = Vec::with_capacity(INDEX_SIZE);
-        for _ in 0..INDEX_SIZE {
+        let mut index_vec = Vec::with_capacity(index_size);
+        for _ in 0..index_size {
             index_vec.push(AtomicSlot::new());
         }
         let index = index_vec.into_boxed_slice();
@@ -129,6 +132,8 @@ impl Shard {
             index,
             account_count: AtomicU32::new(0),
             write_count: AtomicU64::new(0),
+            accounts_per_shard,
+            index_size,
         };
 
         shard.rebuild_index()?;
@@ -137,11 +142,11 @@ impl Shard {
 
     fn rebuild_index(&mut self) -> Result<(), String> {
         let mut count = 0u32;
-        for offset in 0..ACCOUNTS_PER_SHARD {
+        for offset in 0..self.accounts_per_shard {
             let account = self.read_account(offset);
             if account.pubkey != [0u8; 32] {
                 let hash = hash_pubkey(&account.pubkey);
-                let mut idx = (hash as usize) % INDEX_SIZE;
+                let mut idx = (hash as usize) % self.index_size;
                 let mut distance = 0u8;
                 loop {
                     let slot = &self.index[idx];
@@ -153,7 +158,7 @@ impl Shard {
                         count += 1;
                         break;
                     }
-                    idx = (idx + 1) % INDEX_SIZE;
+                    idx = (idx + 1) % self.index_size;
                     distance += 1;
                     if distance > 127 {
                         break;
@@ -167,7 +172,7 @@ impl Shard {
 
     fn insert(&self, pubkey: &[u8; 32], account: &Account) -> Result<(), String> {
         let hash = hash_pubkey(pubkey);
-        let mut idx = (hash as usize) % INDEX_SIZE;
+        let mut idx = (hash as usize) % self.index_size;
         let mut distance = 0u8;
 
         loop {
@@ -176,7 +181,7 @@ impl Shard {
 
             if current == AtomicSlot::EMPTY {
                 let offset = self.account_count.fetch_add(1, Ordering::Relaxed);
-                if offset >= ACCOUNTS_PER_SHARD as u32 {
+                if offset >= self.accounts_per_shard as u32 {
                     return Err("Shard full".to_string());
                 }
 
@@ -208,7 +213,7 @@ impl Shard {
                 }
             }
 
-            idx = (idx + 1) % INDEX_SIZE;
+            idx = (idx + 1) % self.index_size;
             distance += 1;
             if distance > 127 {
                 return Err("Index full".to_string());
@@ -218,7 +223,7 @@ impl Shard {
 
     fn get(&self, pubkey: &[u8; 32]) -> Option<Account> {
         let hash = hash_pubkey(pubkey);
-        let mut idx = (hash as usize) % INDEX_SIZE;
+        let mut idx = (hash as usize) % self.index_size;
         for _ in 0..128 {
             if let Some((slot_hash, offset, _)) = self.index[idx].unpack() {
                 if slot_hash == hash {
@@ -230,7 +235,7 @@ impl Shard {
             } else {
                 return None;
             }
-            idx = (idx + 1) % INDEX_SIZE;
+            idx = (idx + 1) % self.index_size;
         }
         None
     }
@@ -274,7 +279,7 @@ impl Shard {
             .par_iter()
             .map(|(pk, _)| {
                 let hash = hash_pubkey(pk);
-                let mut idx = (hash as usize) % INDEX_SIZE;
+                let mut idx = (hash as usize) % self.index_size;
 
                 // Search for existing entry
                 for _ in 0..128 {
@@ -288,7 +293,7 @@ impl Shard {
                     } else {
                         return (hash, idx, None); // Insert new at this slot
                     }
-                    idx = (idx + 1) % INDEX_SIZE;
+                    idx = (idx + 1) % self.index_size;
                 }
                 (hash, idx, None) // Insert new (fallback)
             })
@@ -303,10 +308,10 @@ impl Shard {
             let offset = self
                 .account_count
                 .fetch_add(insert_count as u32, Ordering::Relaxed);
-            if offset + (insert_count as u32) > ACCOUNTS_PER_SHARD as u32 {
+            if offset + (insert_count as u32) > self.accounts_per_shard as u32 {
                 println!(
                     "❌ Shard full! Offset: {}, Insert: {}, Max: {}",
-                    offset, insert_count, ACCOUNTS_PER_SHARD
+                    offset, insert_count, self.accounts_per_shard
                 );
                 return Err("Shard full".to_string());
             }
@@ -366,7 +371,7 @@ impl Shard {
                         break;
                     }
 
-                    idx = (idx + 1) % INDEX_SIZE;
+                    idx = (idx + 1) % self.index_size;
                     distance += 1;
                     if distance > 127 {
                         break;
@@ -383,14 +388,20 @@ impl Shard {
 
 pub struct GeometricLedger {
     shards: Vec<Shard>,
+    pub shard_count: usize,
+    pub accounts_per_shard: usize,
 }
 
 impl GeometricLedger {
-    pub fn new(data_dir: impl AsRef<Path>) -> Result<Self, String> {
+    pub fn new(
+        data_dir: impl AsRef<Path>,
+        shard_count: usize,
+        accounts_per_shard: usize,
+    ) -> Result<Self, String> {
         let data_dir = data_dir.as_ref();
-        let shards: Result<Vec<_>, _> = (0..SHARD_COUNT)
+        let shards: Result<Vec<_>, _> = (0..shard_count)
             .into_par_iter()
-            .map(|i| Shard::open(data_dir, i))
+            .map(|i| Shard::open(data_dir, i, accounts_per_shard))
             .collect();
 
         let shards = shards?;
@@ -399,29 +410,34 @@ impl GeometricLedger {
             .map(|s| s.account_count.load(Ordering::Relaxed))
             .sum();
         println!("✅ Geometric Ledger loaded: {} accounts active.", total);
-        println!("ℹ️  ACCOUNTS_PER_SHARD constant: {}", ACCOUNTS_PER_SHARD);
+        println!("ℹ️  ACCOUNTS_PER_SHARD: {}", accounts_per_shard);
+        println!("ℹ️  SHARD_COUNT: {}", shard_count);
 
         // Log per-shard usage to debug "Shard full" issues
         for (i, shard) in shards.iter().enumerate() {
             let count = shard.account_count.load(Ordering::Relaxed);
-            if count > ACCOUNTS_PER_SHARD as u32 * 9 / 10 {
+            if count > accounts_per_shard as u32 * 9 / 10 {
                 println!(
                     "⚠️  Shard #{} is {}% full ({}/{})",
                     i,
-                    count * 100 / ACCOUNTS_PER_SHARD as u32,
+                    count * 100 / accounts_per_shard as u32,
                     count,
-                    ACCOUNTS_PER_SHARD
+                    accounts_per_shard
                 );
             }
         }
 
-        Ok(Self { shards })
+        Ok(Self {
+            shards,
+            shard_count,
+            accounts_per_shard,
+        })
     }
 
     pub fn update_batch(&self, updates: &[([u8; 32], Account)]) -> Result<(), String> {
-        let mut buckets: Vec<Vec<_>> = (0..SHARD_COUNT).map(|_| Vec::new()).collect();
+        let mut buckets: Vec<Vec<_>> = (0..self.shard_count).map(|_| Vec::new()).collect();
         for (pk, acc) in updates {
-            buckets[pk[0] as usize % SHARD_COUNT].push((pk, acc));
+            buckets[pk[0] as usize % self.shard_count].push((pk, acc));
         }
 
         // Use batch insert for each shard (parallel across shards)
@@ -434,7 +450,7 @@ impl GeometricLedger {
     }
 
     pub fn get(&self, pubkey: &[u8; 32]) -> Option<Account> {
-        self.shards[pubkey[0] as usize % SHARD_COUNT].get(pubkey)
+        self.shards[pubkey[0] as usize % self.shard_count].get(pubkey)
     }
 
     pub fn mint(&self, pubkey: [u8; 32], amount: u64) {
@@ -465,8 +481,8 @@ impl GeometricLedger {
         LedgerStats {
             total_accounts,
             total_writes,
-            shard_count: SHARD_COUNT,
-            capacity: (SHARD_COUNT * ACCOUNTS_PER_SHARD) as u64,
+            shard_count: self.shard_count,
+            capacity: (self.shard_count * self.accounts_per_shard) as u64,
         }
     }
 }
