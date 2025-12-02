@@ -209,16 +209,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("✅ {} Consumer threads started", num_pairs);
 
+    // Pre-mint tokens for test accounts (always)
+    // We mint for 1M accounts to match the client's load test range
+    info!("💰 Pre-minting balances for 1,000,000 accounts (this may take a moment)...");
+    for i in 0..1_000_000u64 {
+        let sender_seed = i.to_le_bytes();
+        let sender_hash = blake3::hash(&sender_seed);
+        let sender_addr = *sender_hash.as_bytes();
+        // Mint enough for many transactions
+        ledger.mint(sender_addr, 1_000_000_000);
+    }
+    info!("✅ Pre-minting complete!");
+
     // Spawn Producers
     if args.producer {
-        for i in 0..10000u64 {
-            let sender_seed = i.to_le_bytes();
-            let sender_hash = blake3::hash(&sender_seed);
-            let sender_addr = *sender_hash.as_bytes();
-            ledger.mint(sender_addr, u64::MAX / 10000);
-        }
-        info!("💰 Pre-minted balance for 10K senders");
-
         let tps_per_producer = args.tps / num_pairs as u64;
 
         for i in 0..num_pairs {
