@@ -5,7 +5,7 @@
 //! 2. Closes the ledger
 //! 3. Reopens the ledger to verify state was persisted
 
-use pos::{GeometricLedger, Account};
+use pos::{Account, GeometricLedger};
 use std::sync::Arc;
 
 fn main() {
@@ -21,7 +21,10 @@ fn main() {
 
     println!("1️⃣  Creating new ledger and processing transfers...");
     {
-        let ledger = Arc::new(GeometricLedger::new(db_path).expect("Failed to create ledger"));
+        // Use 16 shards and 1M accounts for testing
+        let ledger = Arc::new(
+            GeometricLedger::new(db_path, 16, 1_000_000).expect("Failed to create ledger"),
+        );
 
         // Create test accounts
         let alice = [1u8; 32];
@@ -34,15 +37,21 @@ fn main() {
         // Apply transfers using batch update
         let mut alice_acc = ledger.get(&alice).unwrap();
         alice_acc.balance -= 5_000;
-        
-        let bob_acc = Account { pubkey: bob, balance: 3_000, ..Default::default() };
-        let charlie_acc = Account { pubkey: charlie, balance: 2_000, ..Default::default() };
 
-        ledger.update_batch(&[
-            (alice, alice_acc),
-            (bob, bob_acc),
-            (charlie, charlie_acc),
-        ]).expect("Batch update failed");
+        let bob_acc = Account {
+            pubkey: bob,
+            balance: 3_000,
+            ..Default::default()
+        };
+        let charlie_acc = Account {
+            pubkey: charlie,
+            balance: 2_000,
+            ..Default::default()
+        };
+
+        ledger
+            .update_batch(&[(alice, alice_acc), (bob, bob_acc), (charlie, charlie_acc)])
+            .expect("Batch update failed");
 
         // Force flush to disk
         ledger.snapshot().expect("Snapshot failed");
@@ -57,14 +66,20 @@ fn main() {
         println!("   Charlie balance: {}", charlie_balance);
         println!();
 
-        assert_eq!(alice_balance, 5_000, "Alice should have 5,000 after transfers");
+        assert_eq!(
+            alice_balance, 5_000,
+            "Alice should have 5,000 after transfers"
+        );
         assert_eq!(bob_balance, 3_000, "Bob should have 3,000");
         assert_eq!(charlie_balance, 2_000, "Charlie should have 2,000");
     } // Ledger is dropped here
 
     println!("2️⃣  Ledger closed. Reopening to verify persistence...");
     {
-        let ledger = Arc::new(GeometricLedger::new(db_path).expect("Failed to reopen ledger"));
+        // Must match the config used when creating
+        let ledger = Arc::new(
+            GeometricLedger::new(db_path, 16, 1_000_000).expect("Failed to reopen ledger"),
+        );
 
         let alice = [1u8; 32];
         let bob = [2u8; 32];
