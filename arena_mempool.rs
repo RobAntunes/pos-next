@@ -307,6 +307,83 @@ impl ArenaMempool {
         }
         false
     }
+
+    // =========================================================================
+    // PAGE-BASED ELASTIC PULLING
+    // =========================================================================
+
+    /// Pull ALL ready zones from a worker's partition (elastic batching)
+    /// Returns a Vec of transaction slices - each slice is one zone (page)
+    /// This enables elastic batch sizes based on available data
+    pub fn pull_all_ready(&self, worker_id: usize) -> Vec<Vec<Transaction>> {
+        if worker_id >= MAX_WORKERS {
+            return Vec::new();
+        }
+
+        let mut pages = Vec::new();
+
+        // Scan all zones in this worker's partition
+        for i in 0..ZONES_PER_WORKER {
+            let zone_idx = Self::zone_index(worker_id, i);
+            let zone = &self.zones[zone_idx];
+
+            if zone.is_ready() {
+                // Take transactions from this zone
+                let txs = zone.take().to_vec();
+                if !txs.is_empty() {
+                    pages.push(txs);
+                }
+                // Mark zone as free
+                zone.mark_free();
+                self.total_batches.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        pages
+    }
+
+    /// Pull up to max_pages ready zones from a worker's partition
+    /// For bounded elastic batching
+    pub fn pull_pages(&self, worker_id: usize, max_pages: usize) -> Vec<Vec<Transaction>> {
+        if worker_id >= MAX_WORKERS {
+            return Vec::new();
+        }
+
+        let mut pages = Vec::with_capacity(max_pages);
+
+        for i in 0..ZONES_PER_WORKER {
+            if pages.len() >= max_pages {
+                break;
+            }
+
+            let zone_idx = Self::zone_index(worker_id, i);
+            let zone = &self.zones[zone_idx];
+
+            if zone.is_ready() {
+                let txs = zone.take().to_vec();
+                if !txs.is_empty() {
+                    pages.push(txs);
+                }
+                zone.mark_free();
+                self.total_batches.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        pages
+    }
+
+    /// Count ready zones in a worker's partition (for monitoring)
+    pub fn ready_count_for_worker(&self, worker_id: usize) -> usize {
+        if worker_id >= MAX_WORKERS {
+            return 0;
+        }
+        (0..ZONES_PER_WORKER)
+            .filter(|i| {
+                let zone_idx = Self::zone_index(worker_id, *i);
+                self.zones[zone_idx].is_ready()
+            })
+            .count()
+    }
 }
 
 impl Default for ArenaMempool {

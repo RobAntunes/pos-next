@@ -10,8 +10,10 @@ pub mod mempool;
 pub mod arena_mempool;
 pub mod ring;
 pub mod tui;
+pub mod spent_set;
 
 pub use sequencer::{Sequencer, SequencerConfig};
+pub use spent_set::{SpentSet, SpentSetStats};
 pub use round::{RoundManager, RoundConfig, RoundMetrics};
 pub use messages::{WireMessage, SerializableBatchHeader, SerializableTransaction, PROTOCOL_VERSION, RedirectReason};
 pub use mempool::{Mempool, MempoolConfig, MempoolStats};

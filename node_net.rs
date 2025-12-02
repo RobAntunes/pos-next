@@ -28,7 +28,7 @@ use tracing::{info, warn};
 
 use pos::{
     messages::{deserialize_message, serialize_message, RedirectReason},
-    ArenaMempool, GeometricLedger, Sequencer, SequencerConfig, Transaction, TransactionPayload,
+    ArenaMempool, GeometricLedger, Sequencer, SequencerConfig, SpentSet, Transaction, TransactionPayload,
     WireMessage, PROTOCOL_VERSION,
 };
 
@@ -372,22 +372,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let peer_registry = Arc::new(PeerRegistry::new());
     let peer_registry_clone = peer_registry.clone();
 
+    // Initialize SpentSet for dedup at ingestion (double-spend prevention)
+    let spent_set = Arc::new(SpentSet::new());
+    let spent_set_clone = spent_set.clone();
+    info!("🛡️  SpentSet initialized (dedup gate active)");
+
     // Start QUIC transport
     let quic_endpoint = start_quic_server(args.port).await?;
     let quic_endpoint_clone = quic_endpoint.clone();
 
     let total_received = Arc::new(AtomicU64::new(0));
     let total_received_clone = total_received.clone();
+    let total_deduped = Arc::new(AtomicU64::new(0));
+    let total_deduped_clone = total_deduped.clone();
     let arena_clone = arena.clone();
     let node_id = generate_node_id(&node_name);
     let listen_port = args.port;
 
-    // Spawn QUIC listener with three-layer flow control
+    // Spawn QUIC listener with three-layer flow control + dedup gate
     tokio::spawn(async move {
         handle_quic_connections(
             quic_endpoint_clone,
             arena_clone,
             total_received_clone,
+            total_deduped_clone,
+            spent_set_clone,
             node_id,
             listen_port,
             num_pairs,
@@ -408,7 +417,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("✅ L0 (mDNS) discovery service started");
 
-    let batch_size = args.batch_size;
+    // Elastic batching - no fixed batch_size needed
     let total_processed = Arc::new(AtomicU64::new(0));
     let total_processed_clone = total_processed.clone();
     let total_applied = Arc::new(AtomicU64::new(0));
@@ -423,8 +432,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let shard_senders = Arc::new(shard_senders);
 
-    // Spawn Consumers (Consumers pull from their partition)
-    // Spawn Consumers (Consumers pull from their partition)
+    // Spawn Consumers with ELASTIC BATCHING (pull all available pages)
     let mut sequencers = Vec::new();
     for i in 0..num_pairs {
         let sequencer = Arc::new(Sequencer::new(sequencer_config.clone()));
@@ -440,15 +448,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sequencer,
                 arena_consumer,
                 total_clone,
-                batch_size,
                 shard_senders_clone,
             );
         });
     }
 
-    info!("✅ {} Consumer threads started", num_pairs);
-
-    info!("✅ {} Consumer threads started", num_pairs);
+    info!("✅ {} Consumer threads started [ELASTIC MODE]", num_pairs);
 
     // Spawn Producers
     if args.producer {
@@ -511,6 +516,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ = tokio::time::sleep(Duration::from_secs(5)) => {
                 let total = total_processed.load(Ordering::Relaxed);
                 let rejected = total_rejected.load(Ordering::Relaxed);
+                let deduped = total_deduped.load(Ordering::Relaxed);
 
                 // Aggregate sequenced count from all workers
                 let sequenced: u64 = sequencers.iter()
@@ -518,6 +524,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .sum();
 
                 let stats = arena.stats();
+                let spent_stats = spent_set.stats();
                 let lag = sequenced.saturating_sub(total + rejected);
 
                 let now = std::time::Instant::now();
@@ -528,13 +535,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 last_time = now;
 
                 info!(
-                    "📊 Heartbeat | TPS: {:.0} | Arena: ready={} free={} | Sequenced: {} | Applied: {} | Rejected: {} | Lag: {}",
+                    "📊 Heartbeat | TPS: {:.0} | Arena: ready={} free={} | Sequenced: {} | Applied: {} | Rejected: {} | Deduped: {} | SpentSet: {} | Lag: {}",
                     tps,
                     stats.zones_ready,
                     stats.zones_free,
                     sequenced,
                     total,
                     rejected,
+                    deduped,
+                    spent_stats.total_entries,
                     lag
                 );
             }
@@ -652,7 +661,8 @@ async fn start_quic_server(port: u16) -> Result<Endpoint, Box<dyn std::error::Er
     Ok(endpoint)
 }
 
-/// Handle incoming QUIC connections with three-layer flow control:
+/// Handle incoming QUIC connections with four-layer flow control:
+/// Layer 0: SpentSet dedup gate (double-spend prevention)
 /// Layer 1: QUIC transport backpressure (delay read until capacity)
 /// Layer 2: BatchAccepted response with credits
 /// Layer 3: Perigee-inspired peer forwarding when overloaded
@@ -660,6 +670,8 @@ async fn handle_quic_connections(
     endpoint: Endpoint,
     arena: Arc<ArenaMempool>,
     total_received: Arc<AtomicU64>,
+    total_deduped: Arc<AtomicU64>,
+    spent_set: Arc<SpentSet>,
     _node_id: [u8; 32],
     listen_port: u16,
     num_active_workers: usize,
@@ -667,11 +679,13 @@ async fn handle_quic_connections(
 ) {
     let next_worker = Arc::new(AtomicUsize::new(0));
     let current_tps = Arc::new(AtomicU64::new(0));
-    let self_address = format!("0.0.0.0:{}", listen_port);
+    let self_address = format!("*******:{}", listen_port);
 
     while let Some(connecting) = endpoint.accept().await {
         let arena = arena.clone();
         let total_received = total_received.clone();
+        let total_deduped = total_deduped.clone();
+        let spent_set = spent_set.clone();
         let next_worker = next_worker.clone();
         let current_tps = current_tps.clone();
         let peer_registry = peer_registry.clone();
@@ -683,6 +697,8 @@ async fn handle_quic_connections(
                     while let Ok((mut send, mut recv)) = connection.accept_bi().await {
                         let arena = arena.clone();
                         let total_received = total_received.clone();
+                        let total_deduped = total_deduped.clone();
+                        let spent_set = spent_set.clone();
                         let next_worker = next_worker.clone();
                         let current_tps = current_tps.clone();
                         let peer_registry = peer_registry.clone();
@@ -722,20 +738,35 @@ async fn handle_quic_connections(
                                         WireMessage::BatchSubmission { txs } => {
                                             let txs: Vec<Transaction> =
                                                 txs.into_iter().map(|tx| tx.into()).collect();
-                                            let count = txs.len();
+
+                                            // ═══════════════════════════════════════════
+                                            // LAYER 0: SpentSet Dedup Gate
+                                            // Filter out double-spend attempts BEFORE arena
+                                            // ═══════════════════════════════════════════
+                                            let (clean_txs, dupes) = spent_set.filter_batch(txs, |tx| {
+                                                (&tx.sender, tx.nonce)
+                                            });
+                                            let count = clean_txs.len();
+                                            
+                                            if dupes > 0 {
+                                                total_deduped.fetch_add(dupes as u64, Ordering::Relaxed);
+                                            }
 
                                             let worker_id = next_worker
                                                 .fetch_add(1, Ordering::Relaxed)
                                                 % num_active_workers;
 
-                                            // Try to submit
-                                            let submitted = if arena.submit_batch_partitioned(worker_id, &txs) {
+                                            // Try to submit (only clean txs)
+                                            let submitted = if count == 0 {
+                                                // All txs were duplicates
+                                                true // Still "submitted" for response purposes
+                                            } else if arena.submit_batch_partitioned(worker_id, &clean_txs) {
                                                 total_received.fetch_add(count as u64, Ordering::Relaxed);
                                                 true
                                             } else {
                                                 // Fallback to another worker
                                                 let retry_worker = (worker_id + 1) % num_active_workers;
-                                                if arena.submit_batch_partitioned(retry_worker, &txs) {
+                                                if arena.submit_batch_partitioned(retry_worker, &clean_txs) {
                                                     total_received.fetch_add(count as u64, Ordering::Relaxed);
                                                     true
                                                 } else {
@@ -1040,12 +1071,13 @@ async fn producer_loop(
     }
 }
 
+/// Elastic consumer loop - pulls ALL available pages and processes them
+/// Batch size is determined by available data, not a fixed number
 fn consumer_loop_blocking(
     worker_id: usize,
     sequencer: Arc<Sequencer>,
     arena: Arc<ArenaMempool>,
     total_processed: Arc<AtomicU64>,
-    _batch_size: usize,
     shard_senders: Arc<Vec<std::sync::mpsc::SyncSender<ShardWork>>>,
 ) {
     use std::time::Instant;
@@ -1054,50 +1086,68 @@ fn consumer_loop_blocking(
     let mut processed_since_report: u64 = 0;
     let mut accepted_since_report: u64 = 0;
     let mut rejected_since_report: u64 = 0;
+    let mut pages_since_report: u64 = 0;
 
     tracing::info!(
-        "🔄 Consumer #{} starting (Partition {})",
+        "🔄 Consumer #{} starting (Partition {}) [ELASTIC MODE]",
         worker_id,
         worker_id
     );
 
     loop {
-        // Pull from partition
-        if let Some(txs) = arena.pull_batch_partitioned(worker_id) {
-            if !txs.is_empty() {
-                let _batch_start = Instant::now();
-                let (accepted, rejected) = sequencer.process_batch(txs);
-
-                if let Some(batch) = sequencer.finalize_batch() {
-                    let batch = Arc::new(batch);
-                    let total_txs = batch.transactions.len();
-                    let num_shards = shard_senders.len();
-                    let chunk_size = (total_txs + num_shards - 1) / num_shards;
-
-                    for (i, sender) in shard_senders.iter().enumerate() {
-                        let start = i * chunk_size;
-                        if start >= total_txs {
-                            break;
-                        }
-                        let count = std::cmp::min(chunk_size, total_txs - start);
-                        let work = ShardWork {
-                            batch: batch.clone(),
-                            start,
-                            count,
-                        };
-                        let _ = sender.send(work);
-                    }
-                    batches_since_report += 1;
-                }
-
-                // Update metrics for ALL processed transactions (accepted or rejected)
-                total_processed.fetch_add((accepted + rejected) as u64, Ordering::Relaxed);
-                processed_since_report += (accepted + rejected) as u64;
-                accepted_since_report += accepted as u64;
-                rejected_since_report += rejected as u64;
+        // ═══════════════════════════════════════════════════════════════
+        // ELASTIC BATCHING: Pull ALL ready pages from this partition
+        // No fixed batch size - process whatever is available
+        // ═══════════════════════════════════════════════════════════════
+        let pages = arena.pull_all_ready(worker_id);
+        
+        if !pages.is_empty() {
+            let page_count = pages.len();
+            pages_since_report += page_count as u64;
+            
+            // Flatten all pages into one elastic batch
+            let total_tx_count: usize = pages.iter().map(|p| p.len()).sum();
+            
+            // Process each page through the sequencer
+            let mut total_accepted = 0usize;
+            let mut total_rejected = 0usize;
+            
+            for page_txs in pages {
+                let (accepted, rejected) = sequencer.process_batch(page_txs);
+                total_accepted += accepted;
+                total_rejected += rejected;
             }
+
+            // Finalize after processing all pages (elastic batch)
+            if let Some(batch) = sequencer.finalize_batch() {
+                let batch = Arc::new(batch);
+                let total_txs = batch.transactions.len();
+                let num_shards = shard_senders.len();
+                let chunk_size = (total_txs + num_shards - 1) / num_shards;
+
+                for (i, sender) in shard_senders.iter().enumerate() {
+                    let start = i * chunk_size;
+                    if start >= total_txs {
+                        break;
+                    }
+                    let count = std::cmp::min(chunk_size, total_txs - start);
+                    let work = ShardWork {
+                        batch: batch.clone(),
+                        start,
+                        count,
+                    };
+                    let _ = sender.send(work);
+                }
+                batches_since_report += 1;
+            }
+
+            // Update metrics
+            total_processed.fetch_add((total_accepted + total_rejected) as u64, Ordering::Relaxed);
+            processed_since_report += (total_accepted + total_rejected) as u64;
+            accepted_since_report += total_accepted as u64;
+            rejected_since_report += total_rejected as u64;
         } else {
-            // No ready zones in partition, yield
+            // No ready pages, yield briefly
             std::thread::sleep(Duration::from_micros(50));
         }
 
@@ -1105,7 +1155,8 @@ fn consumer_loop_blocking(
             let actual_tps = processed_since_report as f64 / last_report.elapsed().as_secs_f64();
             let stats = arena.stats();
             tracing::info!(
-                "⚡ Consumer Stats: {} batches, {} tx/s ({} acc, {} rej) | Arena: {} ready",
+                "⚡ ELASTIC: {} pages → {} batches | {} tx/s ({} acc, {} rej) | Arena: {} ready",
+                pages_since_report,
                 batches_since_report,
                 actual_tps as u64,
                 accepted_since_report,
@@ -1116,6 +1167,7 @@ fn consumer_loop_blocking(
             processed_since_report = 0;
             accepted_since_report = 0;
             rejected_since_report = 0;
+            pages_since_report = 0;
             last_report = Instant::now();
         }
     }
