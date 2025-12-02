@@ -397,6 +397,7 @@ async fn handle_quic_connections(
                     while let Ok((mut send, mut recv)) = connection.accept_bi().await {
                         let arena = arena.clone();
                         let total_received = total_received.clone();
+                        let next_worker = next_worker.clone();
                         tokio::spawn(async move {
                             if let Ok(data) = recv.read_to_end(10 * 1024 * 1024).await {
                                 if let Ok(msg) = deserialize_message(&data) {
