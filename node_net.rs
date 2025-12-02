@@ -811,11 +811,6 @@ fn shard_worker_loop(
                     })
                 });
 
-                // DEBUG: Check balance for first few txs
-                // if count < 5 && shard_id == 0 {
-                //    tracing::info!("Checking balance for sender {:?}: {} >= {}", &sender[0..4], s_acc.balance, amount);
-                // }
-
                 if s_acc.balance >= amount {
                     s_acc.balance -= amount;
                     cache.insert(sender, s_acc);
@@ -827,8 +822,6 @@ fn shard_worker_loop(
                     });
                     r_acc.balance += amount;
                     cache.insert(recipient, r_acc);
-                    r_acc.balance += amount;
-                    cache.insert(recipient, r_acc);
                     applied_count += 1;
                 } else {
                     // tracing::warn!(
@@ -838,18 +831,15 @@ fn shard_worker_loop(
                     //     amount
                     // );
                     cache.insert(sender, s_acc); // Return to cache
+                    rejected_count += 1;
                 }
             }
         }
         if !cache.is_empty() {
             let updates: Vec<_> = cache.into_iter().collect();
             let _ = ledger.update_batch(&updates);
-            total.fetch_add(count, Ordering::Relaxed);
-            // if shard_id == 0 {
-            //    tracing::info!("Worker #{} applied {}/{} txs", shard_id, count, txs.len());
-            // }
-        } else {
-            // tracing::warn!("Worker #{} applied 0 txs (cache empty)", shard_id);
+            total.fetch_add(applied_count, Ordering::Relaxed);
+            total_rejected.fetch_add(rejected_count, Ordering::Relaxed);
         }
     }
 }
