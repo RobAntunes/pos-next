@@ -123,6 +123,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
+    // Pre-mint tokens for test accounts (always)
+    // We mint for 1M accounts to match the client's load test range
+    // CRITICAL: This must happen BEFORE starting the network to avoid race conditions
+    info!("💰 Pre-minting balances for 1,000,000 accounts (this may take a moment)...");
+    for i in 0..1_000_000u64 {
+        let sender_seed = i.to_le_bytes();
+        let secret_hash = blake3::hash(&sender_seed);
+        let secret = *secret_hash.as_bytes();
+        let sender_hash = blake3::hash(&secret);
+        let sender_addr = *sender_hash.as_bytes();
+        // Mint enough for many transactions
+        ledger.mint(sender_addr, 1_000_000_000);
+    }
+    info!("✅ Pre-minting complete!");
+
     // Threading Model
     let total_cores = num_cpus::get();
     let num_pairs = (total_cores / 2).max(1).min(pos::ARENA_MAX_WORKERS);
@@ -209,19 +224,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("✅ {} Consumer threads started", num_pairs);
 
-    // Pre-mint tokens for test accounts (always)
-    // We mint for 1M accounts to match the client's load test range
-    info!("💰 Pre-minting balances for 1,000,000 accounts (this may take a moment)...");
-    for i in 0..1_000_000u64 {
-        let sender_seed = i.to_le_bytes();
-        let secret_hash = blake3::hash(&sender_seed);
-        let secret = *secret_hash.as_bytes();
-        let sender_hash = blake3::hash(&secret);
-        let sender_addr = *sender_hash.as_bytes();
-        // Mint enough for many transactions
-        ledger.mint(sender_addr, 1_000_000_000);
-    }
-    info!("✅ Pre-minting complete!");
+    info!("✅ {} Consumer threads started", num_pairs);
 
     // Spawn Producers
     if args.producer {
