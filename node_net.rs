@@ -214,7 +214,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("💰 Pre-minting balances for 1,000,000 accounts (this may take a moment)...");
     for i in 0..1_000_000u64 {
         let sender_seed = i.to_le_bytes();
-        let sender_hash = blake3::hash(&sender_seed);
+        let secret_hash = blake3::hash(&sender_seed);
+        let secret = *secret_hash.as_bytes();
+        let sender_hash = blake3::hash(&secret);
         let sender_addr = *sender_hash.as_bytes();
         // Mint enough for many transactions
         ledger.mint(sender_addr, 1_000_000_000);
@@ -812,7 +814,12 @@ fn shard_worker_loop(
                     cache.insert(recipient, r_acc);
                     count += 1;
                 } else {
-                    // tracing::warn!("Insufficient balance for sender {:?}: {} < {}", &sender[0..4], s_acc.balance, amount);
+                    tracing::warn!(
+                        "Insufficient balance for sender {:?}: {} < {}",
+                        &sender[0..4],
+                        s_acc.balance,
+                        amount
+                    );
                     cache.insert(sender, s_acc); // Return to cache
                 }
             }
