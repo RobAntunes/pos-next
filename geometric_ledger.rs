@@ -33,7 +33,7 @@ const ACCOUNT_SIZE: usize = 128;
 const SHARD_COUNT: usize = 16;
 // 1M accounts per shard (256 shards × 1M = 256M total capacity)
 // With 8-byte alignment (down from 64), uses ~4GB RAM instead of 32GB
-const ACCOUNTS_PER_SHARD: usize = 1_000_000;
+const ACCOUNTS_PER_SHARD: usize = 2_000_000;
 
 // Atomic index slot
 // OPTIMIZATION: align(64) for cache line alignment - prevents false sharing between adjacent slots
@@ -399,6 +399,7 @@ impl GeometricLedger {
             .map(|s| s.account_count.load(Ordering::Relaxed))
             .sum();
         println!("✅ Geometric Ledger loaded: {} accounts active.", total);
+        println!("ℹ️  ACCOUNTS_PER_SHARD constant: {}", ACCOUNTS_PER_SHARD);
 
         // Log per-shard usage to debug "Shard full" issues
         for (i, shard) in shards.iter().enumerate() {
