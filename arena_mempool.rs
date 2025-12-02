@@ -18,7 +18,7 @@ const WRITING: u8 = 1;
 const READY: u8 = 2;
 
 /// Size of each arena zone (matches batch size for zero-copy)
-pub const ZONE_SIZE: usize = 1_000;
+pub const ZONE_SIZE: usize = 45_000;
 
 /// Zones per worker (producer/consumer pair)
 /// Each worker owns their slice - zero contention!
