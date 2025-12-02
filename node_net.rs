@@ -125,6 +125,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
+    // Threading Model
+    let total_cores = num_cpus::get();
+    let num_pairs = (total_cores / 2).max(1).min(pos::ARENA_MAX_WORKERS);
+    info!(
+        "⚙️ Threading Model: {} Producer/Consumer pairs (using {} cores)",
+        num_pairs,
+        num_pairs * 2
+    );
+
     // Initialize Arena Mempool
     let arena = Arc::new(ArenaMempool::new());
     let arena_capacity = pos::ARENA_MAX_WORKERS * 16 * pos::ZONE_SIZE;
@@ -170,15 +179,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     info!("✅ L0 (mDNS) discovery service started");
-
-    // Threading Model
-    let total_cores = num_cpus::get();
-    let num_pairs = (total_cores / 2).max(1).min(pos::ARENA_MAX_WORKERS);
-    info!(
-        "⚙️ Threading Model: {} Producer/Consumer pairs (using {} cores)",
-        num_pairs,
-        num_pairs * 2
-    );
 
     let batch_size = args.batch_size;
     let total_processed = Arc::new(AtomicU64::new(0));
