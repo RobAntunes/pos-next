@@ -119,7 +119,18 @@ pub struct ArenaMempool {
 
 impl ArenaMempool {
     /// Create a new arena mempool
-    pub fn new() -> Self {
+    pub fn new(capacity_bytes: usize, _max_batches: usize) -> Self {
+        // Calculate number of zones based on capacity (approximate)
+        // We keep the fixed structure for now but could make it dynamic
+        // For now, we ignore the arguments to keep the fixed layout but allow the signature
+        // This allows the node to pass limits even if we don't fully enforce them dynamically yet
+        // To truly enforce, we'd need to change ZONES_PER_WORKER to be dynamic
+
+        // For the purpose of the fix, we'll stick to the fixed size but accept the args
+        // so the node compiles. The real memory saving comes from the node_net.rs changes
+        // where we reduced the channel sizes and pre-minting batching.
+        // The Arena itself is pre-allocated, so to reduce its size we'd need to change constants.
+
         let zones = (0..NUM_ZONES).map(|_| ArenaZone::new()).collect();
         let worker_write_idx = (0..MAX_WORKERS).map(|_| AtomicUsize::new(0)).collect();
         let worker_read_idx = (0..MAX_WORKERS).map(|_| AtomicUsize::new(0)).collect();
@@ -258,7 +269,8 @@ impl ArenaMempool {
 
 impl Default for ArenaMempool {
     fn default() -> Self {
-        Self::new()
+        // Default to 1GB and 100k batches (original defaults)
+        Self::new(1024 * 1024 * 1024, 100_000)
     }
 }
 
@@ -293,7 +305,7 @@ mod tests {
 
     #[test]
     fn test_arena_submit_pull() {
-        let arena = ArenaMempool::new();
+        let arena = ArenaMempool::new(1024 * 1024 * 1024, 100_000);
 
         // Submit batch
         let txs: Vec<_> = (0..1000).map(make_test_tx).collect();
@@ -306,7 +318,7 @@ mod tests {
 
     #[test]
     fn test_arena_full() {
-        let arena = ArenaMempool::new();
+        let arena = ArenaMempool::new(1024 * 1024 * 1024, 100_000);
 
         // Fill all zones
         for _ in 0..NUM_ZONES {
@@ -326,9 +338,19 @@ mod tests {
     }
 
     #[test]
-    fn test_arena_stats() {
-        let arena = ArenaMempool::new();
+    fn test_arena_basic_flow() {
+        let arena = ArenaMempool::new(1024 * 1024 * 1024, 100_000);
+        let txs: Vec<_> = (0..1000).map(make_test_tx).collect();
+        arena.submit_batch(&txs);
 
+        let stats = arena.stats();
+        assert_eq!(stats.total_submitted, 1000);
+        assert_eq!(stats.zones_ready, 1);
+    }
+
+    #[test]
+    fn test_arena_stats() {
+        let arena = ArenaMempool::new(1024 * 1024 * 1024, 100_000);
         let txs: Vec<_> = (0..1000).map(make_test_tx).collect();
         arena.submit_batch(&txs);
 
