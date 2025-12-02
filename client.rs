@@ -96,14 +96,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn0 = endpoint.connect(addr0, "localhost")?.await?;
     let conn1 = endpoint.connect(addr1, "localhost")?.await?;
 
-    // Derive node positions from their names (same algorithm as server)
-    // Server uses: generate_node_id("node-{port}") then hash and calculate_ring_position
-    let node0_name = format!("node-{}", addr0.port());
-    let node1_name = format!("node-{}", addr1.port());
-    let node0_id = blake3::hash(node0_name.as_bytes());
-    let node1_id = blake3::hash(node1_name.as_bytes());
-    let node0_pos = calculate_ring_position(&blake3::hash(node0_id.as_bytes()));
-    let node1_pos = calculate_ring_position(&blake3::hash(node1_id.as_bytes()));
+    // Derive node positions from port (same algorithm as server)
+    // Server uses: port_offset * (u64::MAX / 8) for even spacing
+    let spacing = u64::MAX / 8;
+    let node0_pos = (addr0.port().saturating_sub(9000) as u64) * spacing;
+    let node1_pos = (addr1.port().saturating_sub(9000) as u64) * spacing;
 
     println!("✅ Connected to Shard 0: {} (pos: 0x{:016x})", addr0, node0_pos);
     println!("✅ Connected to Shard 1: {} (pos: 0x{:016x})", addr1, node1_pos);

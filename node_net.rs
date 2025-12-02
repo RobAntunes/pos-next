@@ -292,9 +292,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Initialize sequencer config template
-    // IMPORTANT: node_position is derived from node_id for unique geometric positioning
+    // IMPORTANT: For testing with few nodes, space them evenly on the ring
+    // Port 9000 -> position 0, Port 9001 -> position u64::MAX/2, etc.
     let node_id = generate_node_id(&node_name);
-    let node_position = pos::calculate_ring_position(&blake3::hash(&node_id));
+    let node_position = {
+        // Extract port number and use it to space nodes evenly
+        let port_offset = args.port.saturating_sub(9000) as u64;
+        let spacing = u64::MAX / 8; // Support up to 8 nodes evenly spaced
+        port_offset * spacing
+    };
     let mut sequencer_config = SequencerConfig {
         sequencer_id: node_id,
         batch_size: args.batch_size,
@@ -303,7 +309,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     
     info!(
-        "🎯 Node geometric position: {} (0x{:016x})",
+        "🎯 Node geometric position: {} (0x{:016x}) [port-based spacing]",
         node_name,
         node_position
     );
