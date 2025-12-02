@@ -5,10 +5,9 @@
 //! - L2 (Transport): QUIC-based high-speed data transport
 //! - Automatic handover from discovery to data plane
 
-use mimalloc::MiMalloc;
-
-#[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+// use mimalloc::MiMalloc;
+// #[global_allocator]
+// static GLOBAL: MiMalloc = MiMalloc;
 
 use clap::Parser;
 use futures::stream::StreamExt;
@@ -69,10 +68,6 @@ struct Args {
     /// Maximum mempool size (default: 1M transactions)
     #[arg(long, default_value_t = 1_000_000)]
     mempool_size: usize,
-
-    /// Manual peer list (e.g., --peer 192.168.1.5:9000)
-    #[arg(long)]
-    peer: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -251,29 +246,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!("🌐 Starting Geometric Turbine Network Test...");
-    println!("🚀 VERSION: HASH_REVEAL_DEBUG_v2 (Manual Peering + Logging)");
+    println!("🚀 Geometric Turbine Network (HashReveal Enabled)");
     println!();
-
-    // Manual Peering
-    if !args.peer.is_empty() {
-        info!("🔗 Connecting to {} manual peers...", args.peer.len());
-        for peer_addr in args.peer {
-            let endpoint = quic_endpoint.clone();
-            tokio::spawn(async move {
-                // Parse address (assume IP:PORT)
-                if let Ok(socket_addr) = peer_addr.parse::<SocketAddr>() {
-                    info!("👉 Connecting to manual peer: {}", socket_addr);
-                    if let Err(e) =
-                        connect_to_peer(endpoint, socket_addr.ip(), socket_addr.port()).await
-                    {
-                        warn!("Failed to connect to manual peer {}: {}", peer_addr, e);
-                    }
-                } else {
-                    warn!("Invalid peer address format: {}", peer_addr);
-                }
-            });
-        }
-    }
 
     // Main event loop
     loop {
