@@ -587,7 +587,7 @@ async fn handle_quic_connections(
                                                     * pos::arena_mempool::ZONE_SIZE)
                                                     as u64,
                                                 capacity_tps: 2_000_000, // Hardcoded for now, could be dynamic
-                                            };
+                                            }; // Forced update
                                             let msg_bytes = serialize_message(&response).unwrap();
                                             let _ = send.write_all(&msg_bytes).await;
                                             let _ = send.finish().await;
