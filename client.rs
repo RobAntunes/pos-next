@@ -42,6 +42,10 @@ struct Args {
     /// Transactions per second limit (0 = unlimited)
     #[arg(long, default_value_t = 0)]
     tps: u64,
+
+    /// Start index offset (to avoid nonce collisions on persistent ledger)
+    #[arg(long, default_value_t = 0)]
+    offset: u64,
 }
 
 #[tokio::main]
@@ -76,18 +80,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✅ Connected to Shard 1: {}", addr1);
     println!();
 
-    // Run load test
-    let mode = if args.dumb { "DUMB" } else { "SMART" };
+    // Multi-threaded load generation
+    let num_threads = num_cpus::get();
+    let tx_per_thread = args.count / num_threads as u64;
+
     println!(
-        "🚀 Blasting {} transactions in {} mode...",
-        args.count, mode
+        "🚀 Blasting {} transactions using {} threads...",
+        args.count, num_threads
     );
     println!();
 
     let start = Instant::now();
-    let mut sent_0 = 0u64;
-    let mut sent_1 = 0u64;
-
     let delay_micros = Arc::new(AtomicU64::new(if args.tps > 0 {
         1_000_000 / args.tps
     } else {
@@ -99,143 +102,161 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn0_clone = conn0.clone();
     let conn1_clone = conn1.clone();
 
+    let total_sent = Arc::new(AtomicU64::new(0));
+    let sent_0 = Arc::new(AtomicU64::new(0));
+    let sent_1 = Arc::new(AtomicU64::new(0));
+
+    // Spawn monitor task
+    let total_sent_monitor = total_sent.clone();
+    let count = args.count;
+    let start_monitor = start;
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        let mut last_reported = 0;
         loop {
-            interval.tick().await;
-
-            // Check Shard 0
-            if let Ok((mut send, mut recv)) = conn0_clone.open_bi().await {
-                let msg = WireMessage::MempoolStatus;
-                let msg_bytes = serialize_message(&msg).unwrap();
-                if send.write_all(&msg_bytes).await.is_ok() {
-                    if send.finish().await.is_ok() {
-                        if let Ok(response_data) = recv.read_to_end(1024).await {
-                            if let Ok(WireMessage::MempoolStatusResponse {
-                                pending_count,
-                                capacity_tps,
-                            }) = deserialize_message(&response_data)
-                            {
-                                adjust_rate(&delay_clone, pending_count, capacity_tps);
-                            }
-                        }
-                    }
-                }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let current = total_sent_monitor.load(Ordering::Relaxed);
+            if current >= count {
+                break;
             }
 
-            // Check Shard 1 (similar logic, could be refactored)
-            if let Ok((mut send, mut recv)) = conn1_clone.open_bi().await {
-                let msg = WireMessage::MempoolStatus;
-                let msg_bytes = serialize_message(&msg).unwrap();
-                if send.write_all(&msg_bytes).await.is_ok() {
-                    if send.finish().await.is_ok() {
-                        if let Ok(response_data) = recv.read_to_end(1024).await {
-                            if let Ok(WireMessage::MempoolStatusResponse {
-                                pending_count,
-                                capacity_tps,
-                            }) = deserialize_message(&response_data)
-                            {
-                                adjust_rate(&delay_clone, pending_count, capacity_tps);
-                            }
-                        }
-                    }
-                }
-            }
+            let elapsed = start_monitor.elapsed().as_secs_f64();
+            let tps = (current - last_reported) as f64 / 1.0;
+            let total_tps = current as f64 / elapsed;
+
+            println!(
+                "  Progress: {}/{} ({:.1}% | {:.0} TPS | Avg: {:.0} TPS)",
+                current,
+                count,
+                (current as f64 / count as f64) * 100.0,
+                tps,
+                total_tps
+            );
+            last_reported = current;
         }
     });
 
-    // Batch size for network efficiency
-    let batch_size = 1000;
-    let mut batch_0 = Vec::with_capacity(batch_size);
-    let mut batch_1 = Vec::with_capacity(batch_size);
+    let mut handles = Vec::new();
 
-    for i in 0..args.count {
-        // Generate valid HashReveal credentials (Physics-bound security)
-        // Secret is derived from index (for reproducibility)
-        let secret_hash = blake3::hash(&i.to_le_bytes());
-        let secret: [u8; 32] = *secret_hash.as_bytes();
-
-        // Sender address is the hash of the secret
-        let sender_hash = blake3::hash(&secret);
-        let sender: [u8; 32] = *sender_hash.as_bytes();
-        let timestamp = i; // Define timestamp
-
-        // Create transaction with HashReveal signature
-        // The sequencer will verify: hash(secret) == sender
-        let tx = Transaction::new_fast(
-            sender,
-            TransactionPayload::Transfer {
-                recipient: [(i % 256) as u8; 32],
-                amount: 1,
-                nonce: i,
-            },
-            i,
-            timestamp,
-            secret,
-        );
-
-        // Calculate ring position
-        let tx_hash = tx.hash();
-        let tx_pos = calculate_ring_position(&tx_hash);
-        let midpoint = u64::MAX / 2;
-
-        // Route to correct shard buffer
-        if args.dumb {
-            batch_0.push(tx);
-            sent_0 += 1;
-        } else if tx_pos < midpoint {
-            batch_0.push(tx);
-            sent_0 += 1;
+    for t in 0..num_threads {
+        let conn0 = conn0.clone();
+        let conn1 = conn1.clone();
+        let delay_micros = delay_micros.clone();
+        let total_sent = total_sent.clone();
+        let sent_0 = sent_0.clone();
+        let sent_1 = sent_1.clone();
+        let dumb_mode = args.dumb;
+        let offset = args.offset;
+        let start_idx = t as u64 * tx_per_thread;
+        let end_idx = if t == num_threads - 1 {
+            args.count
         } else {
-            batch_1.push(tx);
-            sent_1 += 1;
-        }
+            start_idx + tx_per_thread
+        };
+        let tps_limit = args.tps / num_threads as u64;
 
-        // Flush batches if full
-        if batch_0.len() >= batch_size {
-            send_batch(&conn0, &batch_0).await?;
-            batch_0.clear();
-        }
-        if batch_1.len() >= batch_size {
-            send_batch(&conn1, &batch_1).await?;
-            batch_1.clear();
-        }
+        handles.push(tokio::spawn(async move {
+            let batch_size = 45000;
+            let mut batch_0 = Vec::with_capacity(batch_size);
+            let mut batch_1 = Vec::with_capacity(batch_size);
 
-        // Rate limit if requested (approximate)
-        // Rate limit if requested (approximate)
-        let current_delay = delay_micros.load(Ordering::Relaxed);
-        if current_delay > 0 && i % batch_size as u64 == 0 {
-            tokio::time::sleep(Duration::from_micros(current_delay * batch_size as u64)).await;
-        }
+            // Local delay for this thread
+            let thread_delay = if tps_limit > 0 {
+                1_000_000 / tps_limit
+            } else {
+                0
+            };
 
-        // Progress report every 10k
-        if (i + 1) % 10_000 == 0 {
-            let elapsed = start.elapsed().as_secs_f64();
-            let current_tps = (i + 1) as f64 / elapsed;
-            println!(
-                "  Progress: {}/{} ({:.1}% | {:.0} TPS)",
-                i + 1,
-                args.count,
-                ((i + 1) as f64 / args.count as f64) * 100.0,
-                current_tps
-            );
-        }
+            for i in start_idx..end_idx {
+                let global_i = i + offset;
+                // Generate valid HashReveal credentials
+                let secret_hash = blake3::hash(&global_i.to_le_bytes());
+                let secret: [u8; 32] = *secret_hash.as_bytes();
+                let sender_hash = blake3::hash(&secret);
+                let sender: [u8; 32] = *sender_hash.as_bytes();
+
+                let tx = Transaction::new_fast(
+                    sender,
+                    TransactionPayload::Transfer {
+                        recipient: [(global_i % 256) as u8; 32],
+                        amount: 1,
+                        nonce: global_i,
+                    },
+                    global_i,
+                    global_i, // timestamp
+                    secret,
+                );
+
+                let tx_pos = calculate_ring_position(&tx.hash());
+                let midpoint = u64::MAX / 2;
+
+                if dumb_mode {
+                    batch_0.push(tx);
+                    sent_0.fetch_add(1, Ordering::Relaxed);
+                } else if tx_pos < midpoint {
+                    batch_0.push(tx);
+                    sent_0.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    batch_1.push(tx);
+                    sent_1.fetch_add(1, Ordering::Relaxed);
+                }
+
+                if batch_0.len() >= batch_size {
+                    if let Err(e) = send_batch(&conn0, &batch_0).await {
+                        eprintln!("Error sending batch to Shard 0: {}", e);
+                    }
+                    batch_0.clear();
+                }
+                if batch_1.len() >= batch_size {
+                    if let Err(e) = send_batch(&conn1, &batch_1).await {
+                        eprintln!("Error sending batch to Shard 1: {}", e);
+                    }
+                    batch_1.clear();
+                }
+
+                total_sent.fetch_add(1, Ordering::Relaxed);
+
+                // Rate limiting
+                let global_delay = delay_micros.load(Ordering::Relaxed);
+                let effective_delay = std::cmp::max(thread_delay, global_delay);
+
+                if effective_delay > 0 && i % batch_size as u64 == 0 {
+                    tokio::time::sleep(Duration::from_micros(effective_delay * batch_size as u64))
+                        .await;
+                }
+            }
+
+            // Flush remaining
+            if !batch_0.is_empty() {
+                let _ = send_batch(&conn0, &batch_0).await;
+            }
+            if !batch_1.is_empty() {
+                let _ = send_batch(&conn1, &batch_1).await;
+            }
+        }));
+    }
+
+    // Wait for all threads
+    for handle in handles {
+        handle.await?;
     }
 
     let elapsed = start.elapsed();
-    let tps = args.count as f64 / elapsed.as_secs_f64();
+    let total = total_sent.load(Ordering::Relaxed);
+    let s0 = sent_0.load(Ordering::Relaxed);
+    let s1 = sent_1.load(Ordering::Relaxed);
+    let tps = total as f64 / elapsed.as_secs_f64();
 
     println!();
     println!("✅ Done!");
     println!(
         "   Sent to Shard 0: {} ({:.1}%)",
-        sent_0,
-        (sent_0 as f64 / args.count as f64) * 100.0
+        s0,
+        (s0 as f64 / total as f64) * 100.0
     );
     println!(
         "   Sent to Shard 1: {} ({:.1}%)",
-        sent_1,
-        (sent_1 as f64 / args.count as f64) * 100.0
+        s1,
+        (s1 as f64 / total as f64) * 100.0
     );
     println!("   Time: {:.2}s", elapsed.as_secs_f64());
     println!("   Average TPS: {:.0}", tps);
@@ -243,10 +264,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.dumb {
         println!("⚠️  DUMB MODE: All transactions sent to Shard 0");
-        println!("   Shard 0 will bridge ~50% to Shard 1");
     } else {
         println!("✨ SMART MODE: Transactions routed to correct shards");
-        println!("   Minimal bridging required");
     }
 
     Ok(())
