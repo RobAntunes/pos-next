@@ -396,6 +396,20 @@ impl GeometricLedger {
             .sum();
         println!("✅ Geometric Ledger loaded: {} accounts active.", total);
 
+        // Log per-shard usage to debug "Shard full" issues
+        for (i, shard) in shards.iter().enumerate() {
+            let count = shard.account_count.load(Ordering::Relaxed);
+            if count > ACCOUNTS_PER_SHARD as u32 * 9 / 10 {
+                println!(
+                    "⚠️  Shard #{} is {}% full ({}/{})",
+                    i,
+                    count * 100 / ACCOUNTS_PER_SHARD as u32,
+                    count,
+                    ACCOUNTS_PER_SHARD
+                );
+            }
+        }
+
         Ok(Self { shards })
     }
 
