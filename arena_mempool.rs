@@ -18,15 +18,15 @@ const WRITING: u8 = 1;
 const READY: u8 = 2;
 
 /// Size of each arena zone (matches batch size for zero-copy)
-pub const ZONE_SIZE: usize = 45_000;
+pub const ZONE_SIZE: usize = 1_000;
 
 /// Zones per worker (producer/consumer pair)
 /// Each worker owns their slice - zero contention!
-pub const ZONES_PER_WORKER: usize = 16;
+pub const ZONES_PER_WORKER: usize = 4;
 
 /// Maximum number of workers (producers + consumers)
 /// INCREASED: Support up to 32 cores for high-core-count machines
-pub const MAX_WORKERS: usize = 32;
+pub const MAX_WORKERS: usize = 4;
 
 /// Total arena zones (32 workers × 16 zones = 512 zones = 23M capacity)
 const NUM_ZONES: usize = ZONES_PER_WORKER * MAX_WORKERS;

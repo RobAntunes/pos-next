@@ -5,10 +5,10 @@
 //! - L2 (Transport): QUIC-based high-speed data transport
 //! - Automatic handover from discovery to data plane
 
-use mimalloc::MiMalloc;
-
-#[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+// use mimalloc::MiMalloc;
+//
+// #[global_allocator]
+// static GLOBAL: MiMalloc = MiMalloc;
 
 use clap::Parser;
 use futures::stream::StreamExt;
