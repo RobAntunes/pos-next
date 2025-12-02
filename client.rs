@@ -10,7 +10,7 @@
 use clap::Parser;
 use pos::{
     calculate_ring_position,
-    messages::{serialize_message, SerializableTransaction, WireMessage},
+    messages::{deserialize_message, serialize_message, SerializableTransaction, WireMessage},
     SignatureType, Transaction, TransactionPayload,
 };
 use quinn::{ClientConfig, Endpoint};
@@ -316,5 +316,33 @@ impl rustls::client::ServerCertVerifier for NoCertificateVerification {
         _now: std::time::SystemTime,
     ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
         Ok(rustls::client::ServerCertVerified::assertion())
+    }
+}
+
+fn adjust_rate(delay_micros: &Arc<AtomicU64>, pending: u64, capacity: u64) {
+    let current = delay_micros.load(Ordering::Relaxed);
+
+    // Simple AIMD (Additive Increase, Multiplicative Decrease) style control
+    // If pending > 50% capacity, slow down
+    // If pending < 10% capacity, speed up
+
+    let threshold_high = capacity / 2;
+    let threshold_low = capacity / 10;
+
+    if pending > threshold_high {
+        // Congestion detected: Increase delay (slow down)
+        let new_delay = if current == 0 { 10 } else { current * 2 };
+        let capped_delay = new_delay.min(10_000); // Cap at 10ms (100 TPS)
+        if capped_delay != current {
+            delay_micros.store(capped_delay, Ordering::Relaxed);
+            // println!("⚠️  Backpressure: Slowing down (Pending: {}, Delay: {}us)", pending, capped_delay);
+        }
+    } else if pending < threshold_low {
+        // Capacity available: Decrease delay (speed up)
+        if current > 0 {
+            let new_delay = current / 2;
+            delay_micros.store(new_delay, Ordering::Relaxed);
+            // println!("🚀 Capacity available: Speeding up (Pending: {}, Delay: {}us)", pending, new_delay);
+        }
     }
 }
