@@ -111,10 +111,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Starting {} on QUIC port {}", node_name, args.port);
     println!();
 
-    // Initialize Geometric Ledger
-    let db_path = format!("./data/geometric_ledger_{}", args.port);
-    let ledger =
-        Arc::new(GeometricLedger::new(&db_path).expect("Failed to initialize GeometricLedger"));
+    // Initialize system info for adaptive configuration
+    let mut sys = sysinfo::System::new_all();
+    sys.refresh_all();
+    let total_memory = sys.total_memory(); // in bytes
+    let available_memory = sys.available_memory();
+
+    info!(
+        "🖥️  System Resources: {} GB Total RAM, {} GB Available",
+        total_memory / 1024 / 1024 / 1024,
+        available_memory / 1024 / 1024 / 1024
+    );
+
+    // Adaptive Configuration
+    // 1. Shard Count: 16 shards per 4GB of RAM, min 16, max 256
+    let shard_count = std::cmp::max(
+        16,
+        std::cmp::min(256, (total_memory / (1024 * 1024 * 1024) * 4) as usize),
+    );
+
+    // 2. Accounts per Shard:
+    //    - < 4GB: 250,000 (Total 4M capacity with 16 shards) -> ~512MB Index RAM
+    //    - < 8GB: 500,000 (Total 8M capacity) -> ~1GB Index RAM
+    //    - >= 8GB: 1,000,000 (Total 16M+ capacity) -> ~2GB+ Index RAM
+    let accounts_per_shard = if total_memory < 4 * 1024 * 1024 * 1024 {
+        250_000
+    } else if total_memory < 8 * 1024 * 1024 * 1024 {
+        500_000
+    } else {
+        1_000_000
+    };
+
+    // 3. Arena Size: Use 10% of available RAM, min 64MB, max 4GB
+    let arena_size = std::cmp::max(
+        64 * 1024 * 1024,
+        std::cmp::min(4 * 1024 * 1024 * 1024, (available_memory / 10) as usize),
+    );
+
+    info!(
+        "⚙️  Adaptive Config: {} Shards, {} Accounts/Shard, {} MB Arena",
+        shard_count,
+        accounts_per_shard,
+        arena_size / 1024 / 1024
+    );
+
+    // Initialize Ledger with adaptive settings
+    let ledger = Arc::new(
+        GeometricLedger::new("data", shard_count, accounts_per_shard)
+            .expect("Failed to initialize ledger"),
+    );
 
     // Initialize sequencer config template
     let sequencer_config = SequencerConfig {
@@ -173,12 +218,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Initialize Arena Mempool
-    // Reduced to 256MB to prevent OOM on Mac during heavy load
+    // Adaptive size based on available RAM
     let arena = Arc::new(ArenaMempool::new(
-        256 * 1024 * 1024, // 256MB capacity
-        100_000,           // 100k batches
+        arena_size, 100_000, // 100k batches
     ));
-    let arena_capacity = 256 * 1024 * 1024; // Update arena_capacity to reflect the new explicit size
+    let arena_capacity = arena_size;
     info!(
         "📦 Arena mempool initialized ({} zones, {}M capacity, partitioned)",
         pos::ARENA_MAX_WORKERS * 16,
@@ -339,7 +383,7 @@ fn start_shard_workers(
     total_applied: Arc<AtomicU64>,
     total_rejected: Arc<AtomicU64>,
 ) -> Vec<std::sync::mpsc::SyncSender<ShardWork>> {
-    let num_shards = 8; // Match thread count or partition count
+    let num_shards = ledger.shard_count;
     let mut senders = Vec::new();
 
     for i in 0..num_shards {
