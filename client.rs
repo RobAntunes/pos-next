@@ -11,7 +11,8 @@ use clap::Parser;
 use pos::{
     calculate_ring_position,
     messages::{deserialize_message, serialize_message, SerializableTransaction, WireMessage, RedirectReason},
-    SignatureType, Transaction, TransactionPayload,
+    ring::RingRoutingTable,
+    Transaction, TransactionPayload,
 };
 use quinn::{ClientConfig, Endpoint};
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -96,14 +97,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn0 = endpoint.connect(addr0, "localhost")?.await?;
     let conn1 = endpoint.connect(addr1, "localhost")?.await?;
 
-    // Derive node positions from port (same algorithm as server)
-    // Server uses: port_offset * (u64::MAX / 8) for even spacing
-    let spacing = u64::MAX / 8;
-    let node0_pos = (addr0.port().saturating_sub(9000) as u64) * spacing;
-    let node1_pos = (addr1.port().saturating_sub(9000) as u64) * spacing;
-
-    println!("✅ Connected to Shard 0: {} (pos: 0x{:016x})", addr0, node0_pos);
-    println!("✅ Connected to Shard 1: {} (pos: 0x{:016x})", addr1, node1_pos);
+    // ═══════════════════════════════════════════════════════════════
+    // Build DHT Ring Routing Table with known nodes
+    // Same algorithm as server: node_id = blake3("node-{port}")
+    // ═══════════════════════════════════════════════════════════════
+    let mut ring_table = RingRoutingTable::new();
+    
+    // Derive node IDs same way servers do
+    let node0_name = format!("node-{}", addr0.port());
+    let node1_name = format!("node-{}", addr1.port());
+    let node0_id = *blake3::hash(node0_name.as_bytes()).as_bytes();
+    let node1_id = *blake3::hash(node1_name.as_bytes()).as_bytes();
+    
+    ring_table.add_node(node0_id);
+    ring_table.add_node(node1_id);
+    
+    println!("✅ Connected to Shard 0: {} (node_id: {})", addr0, hex::encode(&node0_id[..8]));
+    println!("✅ Connected to Shard 1: {} (node_id: {})", addr1, hex::encode(&node1_id[..8]));
+    println!("🔗 DHT Ring built: {} nodes, {} virtual nodes", ring_table.node_count(), ring_table.size());
     println!();
 
     // Optional coordinated start (for multi-host runs)
@@ -232,8 +243,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let tps_limit = args.tps / num_threads as u64;
 
-        let node0_pos = node0_pos;
-        let node1_pos = node1_pos;
+        // Clone node IDs for the spawned task
+        let node0_id = node0_id;
+        let node1_id = node1_id;
+        
+        // Build a local ring table for this thread (immutable after construction)
+        let mut thread_ring = RingRoutingTable::new();
+        thread_ring.add_node(node0_id);
+        thread_ring.add_node(node1_id);
         
         handles.push(tokio::spawn(async move {
             let batch_size = args.batch_size;
@@ -248,47 +265,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             for i in start_idx..end_idx {
-                let global_i = i + offset;
-                // Generate valid HashReveal credentials
-                let secret_hash = blake3::hash(&global_i.to_le_bytes());
+                // Sender derived from i mod 1M (stays within pre-minted account range)
+                let account_i = i % 1_000_000;
+                let secret_hash = blake3::hash(&account_i.to_le_bytes());
                 let secret: [u8; 32] = *secret_hash.as_bytes();
                 let sender_hash = blake3::hash(&secret);
                 let sender: [u8; 32] = *sender_hash.as_bytes();
 
+                // Nonce uses offset for uniqueness across clients
+                let nonce = i + offset;
+
                 let tx = Transaction::new_fast(
                     sender,
                     TransactionPayload::Transfer {
-                        recipient: [(global_i % 256) as u8; 32],
+                        recipient: [(nonce % 256) as u8; 32],
                         amount: 1,
-                        nonce: global_i,
+                        nonce,
                     },
-                    global_i,
-                    global_i, // timestamp
+                    nonce,
+                    nonce, // timestamp
                     secret,
                 );
 
                 let tx_pos = calculate_ring_position(&tx.hash());
 
-                // Calculate ring distance to each node (clockwise)
-                let dist_to_0 = if tx_pos >= node0_pos {
-                    tx_pos - node0_pos
-                } else {
-                    (u64::MAX - node0_pos) + tx_pos + 1
-                };
-                let dist_to_1 = if tx_pos >= node1_pos {
-                    tx_pos - node1_pos
-                } else {
-                    (u64::MAX - node1_pos) + tx_pos + 1
-                };
+                // Use DHT ring to determine which node owns this position
+                let owner = thread_ring.route(tx_pos).unwrap_or(node0_id);
 
                 if dumb_mode {
                     batch_0.push(tx);
                     sent_0.fetch_add(1, Ordering::Relaxed);
-                } else if dist_to_0 <= dist_to_1 {
-                    // Route to closer node
+                } else if owner == node0_id {
+                    // Route to node 0
                     batch_0.push(tx);
                     sent_0.fetch_add(1, Ordering::Relaxed);
                 } else {
+                    // Route to node 1
                     batch_1.push(tx);
                     sent_1.fetch_add(1, Ordering::Relaxed);
                 }

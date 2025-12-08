@@ -12,8 +12,7 @@
 //!
 //! NOTE: Does NOT verify Ed25519 signatures (that's the Verifier's job)
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::sync::atomic::AtomicUsize;
 
 use blake3::{Hash, Hasher};
 use parking_lot::RwLock;
@@ -27,7 +26,9 @@ use crate::types::{
 };
 
 /// Sequencer configuration
-#[derive(Debug, Clone)]
+/// NOTE: DHT routing is handled by NetworkDistributor, NOT here.
+/// Sequencer processes ALL valid transactions without network knowledge.
+#[derive(Clone, Debug)]
 pub struct SequencerConfig {
     /// Sequencer's public key
     pub sequencer_id: [u8; 32],
@@ -35,9 +36,7 @@ pub struct SequencerConfig {
     pub signing_key: [u8; 32],
     /// Maximum transactions per batch
     pub batch_size: usize,
-    /// Maximum ring range for acceptance (distance on the ring)
-    pub max_range: u64,
-    /// Node position on the ring
+    /// Node position on the ring (for batch headers, NOT filtering)
     pub node_position: RingPosition,
 }
 
@@ -51,7 +50,6 @@ impl Default for SequencerConfig {
             sequencer_id: [0u8; 32],
             signing_key: [0u8; 32],
             batch_size: DEFAULT_BATCH_SIZE,
-            max_range: MAX_DISTANCE,
             node_position,
         }
     }
@@ -85,29 +83,25 @@ impl Sequencer {
     }
 
     /// Process a single transaction (fast path - BLAKE3 only)
-    /// Returns true if accepted, false if rejected due to ring range constraints
+    /// Returns true if accepted (valid signature), false if rejected
+    /// NOTE: No DHT filtering here - NetworkDistributor handles routing after batching
     #[inline]
     pub fn process_transaction(&self, tx: Transaction) -> bool {
         // 1. Security Check: Verify Sender (Hash Lock)
-        // This is O(1) hashing, replacing slow Ed25519 math
         if !self.verify_transaction(&tx) {
             return false;
         }
 
-        let start = Instant::now();
-
         // 2. Compute transaction hash (BLAKE3 - fast)
         let tx_hash = tx.hash();
+        let tx_position = calculate_ring_position(&tx_hash);
 
-        // 3. Calculate ring position (BLAKE3 - O(1))
-        let ring_info = self.calculate_ring_info(&tx_hash);
-
-        // 4. Filter by ring range constraint
-        if !ring_info.is_within_range(self.config.max_range) {
-            return false; // Rejected - outside acceptance range
-        }
-
-        // 5. Add to pending batch (Zero atomic overhead)
+        // 3. Add to pending batch (no DHT filtering - accept all valid txs)
+        let ring_info = RingInfo {
+            tx_position,
+            node_position: Some(self.config.node_position),
+            distance: None,
+        };
         let processed = ProcessedTransaction {
             tx,
             ring_info,
@@ -115,7 +109,6 @@ impl Sequencer {
         };
 
         self.pending.push(processed);
-
         true
     }
 
@@ -143,11 +136,10 @@ impl Sequencer {
 
     /// Process a batch of transactions (optimized version - no cloning)
     /// Uses SEQUENTIAL aggregation (Consumer is already parallel)
+    /// NOTE: No DHT filtering - accepts ALL valid transactions
     pub fn process_batch_ref(&self, txs: &[Transaction]) -> (usize, usize) {
-        // let start = Instant::now();
         let total = txs.len();
         let node_pos = self.config.node_position;
-        let max_range = self.config.max_range;
 
         // Filter and extend directly into the pending buffer
         let initial_len = self.pending.len();
@@ -161,13 +153,12 @@ impl Sequencer {
             let tx_hash = tx.hash();
             let ring_info = Self::calculate_ring_info_stateless(&tx_hash, node_pos);
 
-            if ring_info.is_within_range(max_range) {
-                self.pending.push(ProcessedTransaction {
-                    tx: tx.clone(), // Clone needed if we only have reference
-                    ring_info,
-                    tx_hash,
-                });
-            }
+            // Accept all valid transactions (no DHT filtering)
+            self.pending.push(ProcessedTransaction {
+                tx: tx.clone(),
+                ring_info,
+                tx_hash,
+            });
         }
 
         let accepted = self.pending.len() - initial_len;
@@ -175,32 +166,36 @@ impl Sequencer {
     }
 
     /// SEQUENTIAL batch processing with sequential XOR reduction
+    /// NOTE: No DHT filtering - accepts ALL valid transactions
+    /// DHT routing is handled by NetworkDistributor after batch finalization
     pub fn process_batch_parallel_reduce(&self, txs: Vec<Transaction>) -> (usize, usize) {
-        // let start = Instant::now();
         let total = txs.len();
         let node_pos = self.config.node_position;
-        let max_range = self.config.max_range;
 
         // Filter and push directly
         let initial_len = self.pending.len();
 
-        // Since we own the Sequencer and the input Vec, we can iterate and push efficiently
+        // Process all transactions - no DHT lookup, no locks!
         for tx in txs {
-            // 1. Security Check
+            // 1. Security Check (Hash Lock verification)
             if !self.verify_transaction(&tx) {
                 continue;
             }
 
             let tx_hash = tx.hash();
-            let ring_info = Self::calculate_ring_info_stateless(&tx_hash, node_pos);
+            let tx_position = calculate_ring_position(&tx_hash);
 
-            if ring_info.is_within_range(max_range) {
-                self.pending.push(ProcessedTransaction {
-                    tx,
-                    ring_info,
-                    tx_hash,
-                });
-            }
+            // 2. Accept all valid transactions (no DHT filtering)
+            let ring_info = RingInfo {
+                tx_position,
+                node_position: Some(node_pos),
+                distance: None,
+            };
+            self.pending.push(ProcessedTransaction {
+                tx,
+                ring_info,
+                tx_hash,
+            });
         }
 
         let accepted = self.pending.len() - initial_len;
@@ -401,11 +396,7 @@ mod tests {
 
     #[test]
     fn test_process_single_transaction() {
-        let config = SequencerConfig {
-            max_range: u64::MAX, // Accept all
-            ..Default::default()
-        };
-        let sequencer = Sequencer::new(config);
+        let sequencer = Sequencer::new(SequencerConfig::default());
 
         let tx = make_test_tx(0);
         assert!(sequencer.process_transaction(tx));
@@ -414,11 +405,7 @@ mod tests {
 
     #[test]
     fn test_process_batch() {
-        let config = SequencerConfig {
-            max_range: u64::MAX,
-            ..Default::default()
-        };
-        let sequencer = Sequencer::new(config);
+        let sequencer = Sequencer::new(SequencerConfig::default());
 
         let txs: Vec<_> = (0..100).map(make_test_tx).collect();
         let (accepted, rejected) = sequencer.process_batch(txs);
@@ -430,11 +417,7 @@ mod tests {
 
     #[test]
     fn test_finalize_batch() {
-        let config = SequencerConfig {
-            max_range: u64::MAX,
-            ..Default::default()
-        };
-        let sequencer = Sequencer::new(config);
+        let sequencer = Sequencer::new(SequencerConfig::default());
 
         let txs: Vec<_> = (0..50).map(make_test_tx).collect();
         sequencer.process_batch(txs);
@@ -462,7 +445,6 @@ mod tests {
     fn test_ring_distance_no_overflow() {
         let config = SequencerConfig {
             node_position: u64::MAX,
-            max_range: u64::MAX,
             ..Default::default()
         };
         let sequencer = Sequencer::new(config);
@@ -474,11 +456,7 @@ mod tests {
 
     #[test]
     fn test_hash_reveal_verification() {
-        let config = SequencerConfig {
-            max_range: u64::MAX,
-            ..Default::default()
-        };
-        let sequencer = Sequencer::new(config);
+        let sequencer = Sequencer::new(SequencerConfig::default());
 
         // 1. Valid HashReveal
         let secret = [42u8; 32];

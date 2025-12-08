@@ -1,6 +1,7 @@
 pub mod protocol;
 pub mod metrics;
 pub mod types;
+pub mod wal;
 pub mod geometric_ledger;
 pub mod sequencer;
 pub mod round;
@@ -11,6 +12,8 @@ pub mod arena_mempool;
 pub mod ring;
 pub mod tui;
 pub mod spent_set;
+pub mod batch_queue;
+pub mod network_distributor;
 
 pub use sequencer::{Sequencer, SequencerConfig};
 pub use spent_set::{SpentSet, SpentSetStats};
@@ -19,5 +22,7 @@ pub use messages::{WireMessage, SerializableBatchHeader, SerializableTransaction
 pub use mempool::{Mempool, MempoolConfig, MempoolStats};
 pub use arena_mempool::{ArenaMempool, ArenaStats, MAX_WORKERS as ARENA_MAX_WORKERS, ZONE_SIZE};
 pub use ring::{RingRoutingTable, VirtualNodeConfig, calculate_ring_position};
+pub use batch_queue::{BatchQueue, BatchQueueStats};
+pub use network_distributor::{NetworkDistributor, DistributorConfig, DistributorStats, RoutingDecision};
 pub use types::{Transaction, TransactionPayload, Batch, ProcessedTransaction, MAX_DISTANCE, DEFAULT_BATCH_SIZE, SignatureType};
 pub use geometric_ledger::{GeometricLedger, Account};

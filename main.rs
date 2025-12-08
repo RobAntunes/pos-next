@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pos::{
-    Sequencer, SequencerConfig, Transaction, TransactionPayload, DEFAULT_BATCH_SIZE, MAX_DISTANCE,
+    Sequencer, SequencerConfig, Transaction, TransactionPayload, DEFAULT_BATCH_SIZE,
 };
 use rand::RngCore;
 use rayon::prelude::*;
@@ -53,11 +53,11 @@ async fn main() {
     println!();
 
     // Create sequencer with default config
+    // NOTE: DHT routing is now handled by NetworkDistributor, not Sequencer
     let config = SequencerConfig {
         sequencer_id: generate_random_id(),
         signing_key: generate_random_id(),
         batch_size: DEFAULT_BATCH_SIZE,
-        max_range: MAX_DISTANCE,
         ..Default::default()
     };
 

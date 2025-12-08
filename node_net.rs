@@ -28,7 +28,8 @@ use tracing::{info, warn};
 
 use pos::{
     messages::{deserialize_message, serialize_message, RedirectReason},
-    ArenaMempool, GeometricLedger, Sequencer, SequencerConfig, SpentSet, Transaction, TransactionPayload,
+    ArenaMempool, BatchQueue, DistributorConfig, GeometricLedger, NetworkDistributor,
+    RoutingDecision, Sequencer, SequencerConfig, SpentSet, Transaction, TransactionPayload,
     WireMessage, PROTOCOL_VERSION,
 };
 
@@ -292,33 +293,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Initialize sequencer config template
-    // IMPORTANT: For testing with few nodes, space them evenly on the ring
-    // Port 9000 -> position 0, Port 9001 -> position u64::MAX/2, etc.
+    // Node ID is derived from node name (deterministic)
     let node_id = generate_node_id(&node_name);
-    let node_position = {
-        // Extract port number and use it to space nodes evenly
-        let port_offset = args.port.saturating_sub(9000) as u64;
-        let spacing = u64::MAX / 8; // Support up to 8 nodes evenly spaced
-        port_offset * spacing
-    };
-    let mut sequencer_config = SequencerConfig {
+    
+    // Node position for logging
+    let node_position = pos::ring::calculate_position_from_bytes(&node_id);
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // DECOUPLED ARCHITECTURE:
+    // - Sequencer: Processes ALL transactions (no DHT knowledge)
+    // - BatchQueue: Lock-free handoff between sequencer and network layer
+    // - NetworkDistributor: Owns DHT, routes batches after sequencer
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    // Sequencer config - NO DHT, processes ALL valid transactions
+    let sequencer_config = SequencerConfig {
         sequencer_id: node_id,
         batch_size: args.batch_size,
         node_position,
         ..Default::default()
     };
     
+    // BatchQueue: Handoff point between sequencer and network distributor
+    let batch_queue = Arc::new(BatchQueue::default());
+    
+    // NetworkDistributor: Owns DHT ring, handles routing AFTER batch creation
+    let distributor_config = DistributorConfig {
+        node_id,
+        virtual_nodes: 200,
+    };
+    let network_distributor = Arc::new(NetworkDistributor::new(
+        distributor_config,
+        batch_queue.clone(),
+    ));
+    
     info!(
-        "🎯 Node geometric position: {} (0x{:016x}) [port-based spacing]",
+        "🔗 Decoupled architecture initialized: node_id={}, ring_size={}",
+        hex::encode(&node_id[..8]),
+        network_distributor.ring_size()
+    );
+    info!(
+        "🎯 Node position: {} (0x{:016x})",
         node_name,
         node_position
     );
-
-    // BENCHMARK MODE: If producer is enabled, accept ALL transactions
-    if args.producer {
-        info!("🚀 BENCHMARK MODE: Max Range set to u64::MAX (Accept All)");
-        sequencer_config.max_range = u64::MAX;
-    }
 
     // Pre-mint tokens for test accounts (always)
     // We mint for 1M accounts to match the client's load test range
@@ -449,6 +467,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shard_senders = Arc::new(shard_senders);
 
     // Spawn Consumers with ELASTIC BATCHING (pull all available pages)
+    // DECOUPLED: Consumers push to BatchQueue, not directly to shard workers
     let mut sequencers = Vec::new();
     for i in 0..num_pairs {
         let sequencer = Arc::new(Sequencer::new(sequencer_config.clone()));
@@ -456,7 +475,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let arena_consumer = arena.clone();
         let total_clone = total_processed.clone();
-        let shard_senders_clone = shard_senders.clone();
+        let batch_queue_clone = batch_queue.clone();
 
         std::thread::spawn(move || {
             consumer_loop_blocking(
@@ -464,12 +483,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sequencer,
                 arena_consumer,
                 total_clone,
-                shard_senders_clone,
+                batch_queue_clone,
             );
         });
     }
 
-    info!("✅ {} Consumer threads started [ELASTIC MODE]", num_pairs);
+    info!("✅ {} Consumer threads started [DECOUPLED - BatchQueue]", num_pairs);
+
+    // Spawn Distributor threads (DHT routing happens here, NOT in sequencer)
+    let total_distributed = Arc::new(AtomicU64::new(0));
+    let num_distributors = num_pairs; // Match consumer count for throughput
+    for i in 0..num_distributors {
+        let distributor_clone = network_distributor.clone();
+        let shard_senders_clone = shard_senders.clone();
+        let total_dist_clone = total_distributed.clone();
+
+        std::thread::spawn(move || {
+            distributor_loop(
+                i,
+                distributor_clone,
+                shard_senders_clone,
+                total_dist_clone,
+            );
+        });
+    }
+
+    info!("✅ {} Distributor threads started [DHT ROUTING]", num_distributors);
 
     // Spawn Producers
     if args.producer {
@@ -518,7 +557,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             
                             // Add to Perigee peer registry for capacity-aware forwarding
                             let peer_addr = format!("{}:{}", ip, target_port);
-                            peer_registry.add_peer(peer_addr);
+                            peer_registry.add_peer(peer_addr.clone());
+                            
+                            // ═══════════════════════════════════════════════════════
+                            // DHT: Add peer to NetworkDistributor (decoupled from sequencer)
+                            // Derive peer's node_id from their port (same as they do)
+                            // ═══════════════════════════════════════════════════════
+                            let peer_node_name = format!("node-{}", target_port);
+                            let peer_node_id = generate_node_id(&peer_node_name);
+                            let before = network_distributor.node_count();
+                            network_distributor.add_peer(peer_node_id);
+                            let after = network_distributor.node_count();
+                            if after > before {
+                                info!(
+                                    "🔗 DHT Ring updated: Added peer {} (node_id: {}, total nodes: {})",
+                                    peer_addr,
+                                    hex::encode(&peer_node_id[..8]),
+                                    after
+                                );
+                            }
                             
                             let endpoint = quic_endpoint.clone();
                             tokio::spawn(async move {
@@ -1089,12 +1146,13 @@ async fn producer_loop(
 
 /// Elastic consumer loop - pulls ALL available pages and processes them
 /// Batch size is determined by available data, not a fixed number
+/// DECOUPLED: Pushes finalized batches to BatchQueue (no DHT knowledge)
 fn consumer_loop_blocking(
     worker_id: usize,
     sequencer: Arc<Sequencer>,
     arena: Arc<ArenaMempool>,
     total_processed: Arc<AtomicU64>,
-    shard_senders: Arc<Vec<std::sync::mpsc::SyncSender<ShardWork>>>,
+    batch_queue: Arc<BatchQueue>,
 ) {
     use std::time::Instant;
     let mut last_report = Instant::now();
@@ -1105,7 +1163,7 @@ fn consumer_loop_blocking(
     let mut pages_since_report: u64 = 0;
 
     tracing::info!(
-        "🔄 Consumer #{} starting (Partition {}) [ELASTIC MODE]",
+        "🔄 Consumer #{} starting (Partition {}) [DECOUPLED MODE]",
         worker_id,
         worker_id
     );
@@ -1121,10 +1179,7 @@ fn consumer_loop_blocking(
             let page_count = pages.len();
             pages_since_report += page_count as u64;
             
-            // Flatten all pages into one elastic batch
-            let total_tx_count: usize = pages.iter().map(|p| p.len()).sum();
-            
-            // Process each page through the sequencer
+            // Process each page through the sequencer (NO DHT - accepts ALL valid txs)
             let mut total_accepted = 0usize;
             let mut total_rejected = 0usize;
             
@@ -1135,26 +1190,13 @@ fn consumer_loop_blocking(
             }
 
             // Finalize after processing all pages (elastic batch)
+            // Push to BatchQueue - NetworkDistributor will handle routing
             if let Some(batch) = sequencer.finalize_batch() {
                 let batch = Arc::new(batch);
-                let total_txs = batch.transactions.len();
-                let num_shards = shard_senders.len();
-                let chunk_size = (total_txs + num_shards - 1) / num_shards;
-
-                for (i, sender) in shard_senders.iter().enumerate() {
-                    let start = i * chunk_size;
-                    if start >= total_txs {
-                        break;
-                    }
-                    let count = std::cmp::min(chunk_size, total_txs - start);
-                    let work = ShardWork {
-                        batch: batch.clone(),
-                        start,
-                        count,
-                    };
-                    let _ = sender.send(work);
+                if batch_queue.push(batch) {
+                    batches_since_report += 1;
                 }
-                batches_since_report += 1;
+                // If push fails (backpressure), batch is dropped - this is intentional
             }
 
             // Update metrics
@@ -1170,14 +1212,17 @@ fn consumer_loop_blocking(
         if worker_id == 0 && last_report.elapsed() >= Duration::from_secs(5) {
             let actual_tps = processed_since_report as f64 / last_report.elapsed().as_secs_f64();
             let stats = arena.stats();
+            let bq_stats = batch_queue.stats();
             tracing::info!(
-                "⚡ ELASTIC: {} pages → {} batches | {} tx/s ({} acc, {} rej) | Arena: {} ready",
+                "⚡ SEQUENCER: {} pages → {} batches | {} tx/s ({} acc, {} rej) | Arena: {} | BatchQ: {}/{}",
                 pages_since_report,
                 batches_since_report,
                 actual_tps as u64,
                 accepted_since_report,
                 rejected_since_report,
-                stats.zones_ready
+                stats.zones_ready,
+                bq_stats.current_len,
+                bq_stats.capacity
             );
             batches_since_report = 0;
             processed_since_report = 0;
@@ -1186,6 +1231,103 @@ fn consumer_loop_blocking(
             pages_since_report = 0;
             last_report = Instant::now();
         }
+    }
+}
+
+/// Distributor loop - pulls batches from BatchQueue and routes via DHT
+/// DECOUPLED: This is the ONLY place DHT routing happens
+fn distributor_loop(
+    worker_id: usize,
+    distributor: Arc<NetworkDistributor>,
+    shard_senders: Arc<Vec<std::sync::mpsc::SyncSender<ShardWork>>>,
+    total_distributed: Arc<AtomicU64>,
+) {
+    use std::time::Instant;
+    let mut last_report = Instant::now();
+    let mut batches_since_report: u64 = 0;
+    let mut local_since_report: u64 = 0;
+    let mut remote_since_report: u64 = 0;
+
+    tracing::info!(
+        "📡 Distributor #{} starting [DHT ROUTING]",
+        worker_id
+    );
+
+    loop {
+        // Pull and route batch from queue
+        if let Some((batch, decision)) = distributor.pull_and_route() {
+            batches_since_report += 1;
+            
+            match decision {
+                RoutingDecision::Local => {
+                    // All transactions belong to this node - send to shard workers
+                    local_since_report += 1;
+                    dispatch_to_shards(&batch, &shard_senders);
+                    total_distributed.fetch_add(batch.transactions.len() as u64, Ordering::Relaxed);
+                }
+                RoutingDecision::RemoteSingle { target_node } => {
+                    // All transactions belong to another node
+                    // TODO: Forward via QUIC to target_node
+                    remote_since_report += 1;
+                    tracing::debug!(
+                        "Would forward {} txs to node {}",
+                        batch.transactions.len(),
+                        hex::encode(&target_node[..8])
+                    );
+                    // For now, still process locally (single-node fallback)
+                    dispatch_to_shards(&batch, &shard_senders);
+                    total_distributed.fetch_add(batch.transactions.len() as u64, Ordering::Relaxed);
+                }
+                RoutingDecision::Split { routing_map } => {
+                    // Mixed batch - some local, some remote
+                    // For now, process all locally (proper splitting is future work)
+                    dispatch_to_shards(&batch, &shard_senders);
+                    total_distributed.fetch_add(batch.transactions.len() as u64, Ordering::Relaxed);
+                }
+            }
+        } else {
+            // No batches ready, yield briefly
+            std::thread::sleep(Duration::from_micros(100));
+        }
+
+        if worker_id == 0 && last_report.elapsed() >= Duration::from_secs(5) {
+            let dist_stats = distributor.stats();
+            tracing::info!(
+                "📡 DISTRIBUTOR: {} batches | local={} remote={} | Ring: {} nodes",
+                batches_since_report,
+                local_since_report,
+                remote_since_report,
+                dist_stats.ring_node_count
+            );
+            batches_since_report = 0;
+            local_since_report = 0;
+            remote_since_report = 0;
+            last_report = Instant::now();
+        }
+    }
+}
+
+/// Dispatch a batch to shard workers
+fn dispatch_to_shards(
+    batch: &Arc<pos::Batch>,
+    shard_senders: &[std::sync::mpsc::SyncSender<ShardWork>],
+) {
+    let total_txs = batch.transactions.len();
+    let num_shards = shard_senders.len();
+    let chunk_size = (total_txs + num_shards - 1) / num_shards;
+
+    for (i, sender) in shard_senders.iter().enumerate() {
+        let start = i * chunk_size;
+        if start >= total_txs {
+            break;
+        }
+        let count = std::cmp::min(chunk_size, total_txs - start);
+        let work = ShardWork {
+            batch: batch.clone(),
+            start,
+            count,
+        };
+        let _ = sender.send(work);
     }
 }
 

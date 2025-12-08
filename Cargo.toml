@@ -27,6 +27,10 @@ path = "persistence_test.rs"
 name = "client"
 path = "client.rs"
 
+[[bin]]
+name = "crash-recovery-test"
+path = "crash_recovery_test.rs"
+
 [dependencies]
 blake3 = "1.5"
 rayon = "1.10"
@@ -74,6 +78,8 @@ crossbeam = "0.8"
 ratatui = "0.28"
 crossterm = "0.28"
 sysinfo = "0.30"
+crc32fast = "1.4"
+tempfile = "3.8"
 
 [profile.release]
 opt-level = 3
