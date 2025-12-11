@@ -97,6 +97,8 @@ struct Shard {
     wal: Option<RwLock<WalWriter>>,
     data_path: PathBuf,
     shard_id: usize,
+    /// File handle for dynamic expansion
+    file: RwLock<File>,
 }
 
 impl Shard {
@@ -148,6 +150,7 @@ impl Shard {
             wal,
             data_path: data_dir.to_path_buf(),
             shard_id,
+            file: RwLock::new(file),
         };
 
         // Replay WAL if exists
@@ -288,7 +291,12 @@ impl Shard {
             if current == AtomicSlot::EMPTY {
                 let offset = self.account_count.fetch_add(1, Ordering::Relaxed);
                 if offset >= self.accounts_per_shard as u32 {
-                    return Err("Shard full".to_string());
+                    // Shard is at capacity - trigger expansion warning
+                    self.account_count.fetch_sub(1, Ordering::Relaxed); // Rollback
+                    return Err(format!(
+                        "Shard {} full ({}/{}). Consider expanding capacity.",
+                        self.shard_id, offset, self.accounts_per_shard
+                    ));
                 }
 
                 let packed = AtomicSlot::pack(hash, offset, distance);
@@ -327,6 +335,99 @@ impl Shard {
         }
     }
 
+    /// Dynamically expand shard capacity (doubles the size)
+    /// This is a maintenance operation that should be called when shard reaches ~90% capacity
+    fn expand_capacity(&mut self) -> Result<(), String> {
+        println!("⚠️  Expanding shard {} capacity (this will pause writes)...", self.shard_id);
+
+        let old_capacity = self.accounts_per_shard;
+        let new_capacity = old_capacity * 2;
+        let new_size = (new_capacity * ACCOUNT_SIZE) as u64;
+        let new_index_size = new_capacity * 2;
+
+        // 1. Flush WAL and sync mmap
+        self.flush()?;
+
+        // 2. Drop the current mmap to release the file handle
+        drop(std::mem::take(&mut self.mmap));
+
+        // 3. Expand the file using ftruncate
+        let path = self.data_path.join(format!("shard_{:03}.bin", self.shard_id));
+        {
+            let mut file = self.file.write().unwrap();
+            file.set_len(new_size)
+                .map_err(|e| format!("Failed to expand file: {}", e))?;
+            file.sync_all()
+                .map_err(|e| format!("Failed to sync expanded file: {}", e))?;
+        }
+
+        // 4. Re-open and re-mmap with new size
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|e| format!("Failed to reopen shard file: {}", e))?;
+
+        self.mmap = unsafe {
+            MmapOptions::new()
+                .len(new_size as usize)
+                .map_mut(&file)
+                .map_err(|e| format!("Failed to remap expanded file: {}", e))?
+        };
+
+        // Update file handle
+        *self.file.write().unwrap() = file;
+
+        // 5. Expand index (create new index, rehash all entries)
+        let mut new_index = Vec::with_capacity(new_index_size);
+        for _ in 0..new_index_size {
+            new_index.push(AtomicSlot::new());
+        }
+
+        // Rehash existing accounts into new index
+        for offset in 0..old_capacity {
+            let account = self.read_account(offset);
+            if account.pubkey != [0u8; 32] {
+                let hash = hash_pubkey(&account.pubkey);
+                let mut idx = (hash as usize) % new_index_size;
+                let mut distance = 0u8;
+
+                loop {
+                    let slot = &new_index[idx];
+                    if slot.data.load(Ordering::Relaxed) == AtomicSlot::EMPTY {
+                        slot.data.store(
+                            AtomicSlot::pack(hash, offset as u32, distance),
+                            Ordering::Relaxed,
+                        );
+                        break;
+                    }
+                    idx = (idx + 1) % new_index_size;
+                    distance += 1;
+                    if distance > 127 {
+                        return Err("Index expansion failed - too many collisions".to_string());
+                    }
+                }
+            }
+        }
+
+        // Replace index
+        self.index = new_index.into_boxed_slice();
+        self.accounts_per_shard = new_capacity;
+        self.index_size = new_index_size;
+
+        println!("✅ Shard {} expanded: {} → {} accounts",
+            self.shard_id, old_capacity, new_capacity);
+
+        Ok(())
+    }
+
+    /// Check if shard needs expansion (at 90% capacity)
+    fn needs_expansion(&self) -> bool {
+        let usage = self.account_count.load(Ordering::Relaxed);
+        let threshold = (self.accounts_per_shard as u32 * 90) / 100;
+        usage >= threshold
+    }
+
     fn rebuild_index(&mut self) -> Result<(), String> {
         let mut count = 0u32;
         for offset in 0..self.accounts_per_shard {
@@ -358,6 +459,17 @@ impl Shard {
     }
 
     fn insert(&self, pubkey: &[u8; 32], account: &Account) -> Result<(), String> {
+        // Check if shard needs expansion (warning only - actual expansion requires manual intervention)
+        if self.needs_expansion() {
+            eprintln!(
+                "⚠️  Shard {} at {}% capacity ({}/{}). Consider expanding!",
+                self.shard_id,
+                (self.account_count.load(Ordering::Relaxed) * 100) / self.accounts_per_shard as u32,
+                self.account_count.load(Ordering::Relaxed),
+                self.accounts_per_shard
+            );
+        }
+
         // Write to WAL first (if enabled)
         if let Some(wal_lock) = &self.wal {
             let mut wal = wal_lock.write().unwrap();
@@ -382,7 +494,11 @@ impl Shard {
             if current == AtomicSlot::EMPTY {
                 let offset = self.account_count.fetch_add(1, Ordering::Relaxed);
                 if offset >= self.accounts_per_shard as u32 {
-                    return Err("Shard full".to_string());
+                    self.account_count.fetch_sub(1, Ordering::Relaxed); // Rollback
+                    return Err(format!(
+                        "Shard {} full ({}/{}). Call expand_capacity() to increase size.",
+                        self.shard_id, offset, self.accounts_per_shard
+                    ));
                 }
 
                 let packed = AtomicSlot::pack(hash, offset, distance);

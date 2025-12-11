@@ -1,0 +1,12 @@
+# Bootnode Configuration
+# Format: IP:PORT (one per line)
+# Lines starting with # are ignored
+
+# Example production bootnodes (replace with your actual nodes)
+# 54.123.45.67:8081
+# 34.201.56.78:8081
+# 13.56.234.12:8081
+
+# Local development (default)
+127.0.0.1:8081
+127.0.0.1:8082

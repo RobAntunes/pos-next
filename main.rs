@@ -1,7 +1,7 @@
 //! POS Node Runner - Real-time TPS Benchmark
 //!
 //! This binary runs a sequencer node and displays real-time throughput metrics.
-//! Usage: cargo run --release
+//! Usage: cargo run --release [--verify-signatures]
 
 // Use mimalloc for concurrent allocation (breaks the allocator lock bottleneck)
 use mimalloc::MiMalloc;
@@ -13,12 +13,27 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use clap::Parser;
 use pos::{
     Sequencer, SequencerConfig, Transaction, TransactionPayload, DEFAULT_BATCH_SIZE,
 };
 use rand::RngCore;
 use rayon::prelude::*;
 use tracing_subscriber::EnvFilter;
+
+/// Command-line arguments
+#[derive(Parser, Debug)]
+#[command(name = "pos-node")]
+#[command(about = "POS Protocol Sequencer Node Benchmark", long_about = None)]
+struct Args {
+    /// Enable Ed25519 signature verification (reduces TPS to ~200k)
+    #[arg(long)]
+    verify_signatures: bool,
+
+    /// Benchmark duration in seconds
+    #[arg(long, default_value_t = 30)]
+    duration: u64,
+}
 
 /// Batch size optimized for L3 cache (~32MB)
 /// Formula: (L3_SIZE * 0.5) / TX_SIZE ≈ (32MB * 0.5) / 350 bytes ≈ 45,000
@@ -33,6 +48,10 @@ const BENCHMARK_DURATION: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() {
+    // Parse command-line arguments
+    let args = Args::parse();
+    let benchmark_duration = Duration::from_secs(args.duration);
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -47,17 +66,23 @@ async fn main() {
     println!("╔═══════════════════════════════════════════════════════════════╗");
     println!("║           POS Protocol - Sequencer Node Benchmark             ║");
     println!("╠═══════════════════════════════════════════════════════════════╣");
-    println!("║  Layer 1 (Structure): BLAKE3-only transaction processing      ║");
-    println!("║  Target: 30M+ TPS                                             ║");
+    if args.verify_signatures {
+        println!("║  Mode: SECURE (Ed25519 verification enabled)                  ║");
+        println!("║  Target: ~200k TPS                                            ║");
+    } else {
+        println!("║  Mode: FAST (Hash Reveal only)                                ║");
+        println!("║  Target: 10M+ TPS                                             ║");
+    }
     println!("╚═══════════════════════════════════════════════════════════════╝");
     println!();
 
-    // Create sequencer with default config
+    // Create sequencer with config
     // NOTE: DHT routing is now handled by NetworkDistributor, not Sequencer
     let config = SequencerConfig {
         sequencer_id: generate_random_id(),
         signing_key: generate_random_id(),
         batch_size: DEFAULT_BATCH_SIZE,
+        verify_signatures: args.verify_signatures,
         ..Default::default()
     };
 
@@ -71,7 +96,8 @@ async fn main() {
     println!("🚀 Starting PARALLEL benchmark with mimalloc...");
     println!("   CPU cores: {} (rayon will use all)", num_cpus);
     println!("   Batch size: {} (L3 cache optimized)", TX_BATCH_SIZE);
-    println!("   Duration: {}s", BENCHMARK_DURATION.as_secs());
+    println!("   Duration: {}s", benchmark_duration.as_secs());
+    println!("   Signature verification: {}", if args.verify_signatures { "ENABLED" } else { "DISABLED" });
     println!();
 
     // PRE-GENERATE test data pool to eliminate generator overhead
@@ -224,7 +250,7 @@ async fn main() {
     });
 
     // Wait for benchmark duration
-    tokio::time::sleep(BENCHMARK_DURATION).await;
+    tokio::time::sleep(benchmark_duration).await;
     running.store(false, Ordering::Relaxed);
 
     // Wait for all workers to finish
@@ -241,7 +267,7 @@ async fn main() {
 
     let total_processed = total_processed.load(Ordering::Relaxed);
     let total_rejected = total_rejected.load(Ordering::Relaxed);
-    let avg_tps = total_processed as f64 / BENCHMARK_DURATION.as_secs_f64();
+    let avg_tps = total_processed as f64 / benchmark_duration.as_secs_f64();
 
     println!(
         "║  Total Transactions:  {:>40} ║",
@@ -261,7 +287,11 @@ async fn main() {
     );
     println!(
         "║  Duration:            {:>40} ║",
-        format!("{}s", BENCHMARK_DURATION.as_secs())
+        format!("{}s", benchmark_duration.as_secs())
+    );
+    println!(
+        "║  Signature Mode:      {:>40} ║",
+        if args.verify_signatures { "Ed25519 (Secure)" } else { "Hash Reveal (Fast)" }
     );
     println!("╚═══════════════════════════════════════════════════════════════╝");
 

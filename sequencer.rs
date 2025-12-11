@@ -38,6 +38,8 @@ pub struct SequencerConfig {
     pub batch_size: usize,
     /// Node position on the ring (for batch headers, NOT filtering)
     pub node_position: RingPosition,
+    /// Enable Ed25519 signature verification (reduces TPS to ~200k)
+    pub verify_signatures: bool,
 }
 
 impl Default for SequencerConfig {
@@ -51,6 +53,7 @@ impl Default for SequencerConfig {
             signing_key: [0u8; 32],
             batch_size: DEFAULT_BATCH_SIZE,
             node_position,
+            verify_signatures: false, // Default to fast mode (Hash Reveal only)
         }
     }
 }
@@ -117,14 +120,36 @@ impl Sequencer {
     fn verify_transaction(&self, tx: &Transaction) -> bool {
         match &tx.signature {
             crate::types::SignatureType::HashReveal(secret) => {
-                // Fast Path: Verify pre-image of the sender address
+                // Fast Path: Verify pre-image of the sender address (BLAKE3 only)
                 let derived_sender = blake3::hash(secret);
                 *derived_sender.as_bytes() == tx.sender
             }
-            crate::types::SignatureType::Ed25519(_) => {
-                // Benchmark Mode: Assume Ed25519 checked by gateway/ingress
-                // Enabling this would drop TPS to ~200k.
-                true
+            crate::types::SignatureType::Ed25519(sig_bytes) => {
+                if self.config.verify_signatures {
+                    // Secure Mode: Full Ed25519 verification
+                    // This is cryptographically secure but reduces TPS to ~200k
+                    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+                    // Parse public key from sender
+                    let Ok(public_key) = VerifyingKey::from_bytes(&tx.sender) else {
+                        return false;
+                    };
+
+                    // Parse signature
+                    let Ok(signature) = Signature::from_bytes(sig_bytes) else {
+                        return false;
+                    };
+
+                    // Get signing message
+                    let message = tx.signing_message();
+
+                    // Verify signature
+                    public_key.verify(&message, &signature).is_ok()
+                } else {
+                    // Fast Mode: Assume Ed25519 checked by gateway/ingress
+                    // This maintains 10M+ TPS but requires trusted gateway layer
+                    true
+                }
             }
         }
     }
